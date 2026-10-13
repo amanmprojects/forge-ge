@@ -214,12 +214,12 @@ struct Color {
         return {lerp(r,o.r,t), lerp(g,o.g,t), lerp(b,o.b,t), lerp(a,o.a,t)};
     }
     Color withAlpha(float alpha) const { return {r, g, b, alpha}; }
-    // Pack as R8G8B8A8 for vertex buffers
+    // Pack as R8G8B8A8 for vertex buffers (+0.5 rounds instead of truncating)
     uint32_t pack() const {
-        uint32_t R = (uint32_t)(clamp01(r) * 255.0f);
-        uint32_t G = (uint32_t)(clamp01(g) * 255.0f);
-        uint32_t B = (uint32_t)(clamp01(b) * 255.0f);
-        uint32_t A = (uint32_t)(clamp01(a) * 255.0f);
+        uint32_t R = (uint32_t)(clamp01(r) * 255.0f + 0.5f);
+        uint32_t G = (uint32_t)(clamp01(g) * 255.0f + 0.5f);
+        uint32_t B = (uint32_t)(clamp01(b) * 255.0f + 0.5f);
+        uint32_t A = (uint32_t)(clamp01(a) * 255.0f + 0.5f);
         return R | (G << 8) | (B << 16) | (A << 24);
     }
 };
@@ -239,8 +239,10 @@ public:
     }
     float nextFloat() { return (nextU32() >> 8) * (1.0f / 16777216.0f); } // [0,1)
     float range(float lo, float hi) { return lo + nextFloat() * (hi - lo); }
-    int rangeInt(int lo, int hi) { // inclusive
-        return lo + (int)(nextU32() % (uint32_t)(hi - lo + 1));
+    int rangeInt(int lo, int hi) { // inclusive, bias-free (multiply-high)
+        if (hi < lo) std::swap(lo, hi);
+        uint32_t span = (uint32_t)(hi - lo) + 1u;
+        return lo + (int)(((uint64_t)nextU32() * span) >> 32);
     }
     Vec2 inCircle(float radius = 1.0f) {
         float a = nextFloat() * TAU;
@@ -316,7 +318,8 @@ FORGE_INLINE Vec2 resolveCircleRect(Circle c, const Rect& r) {
 
 // ---------------------------------------------------------------- Value noise (deterministic, no tables)
 FORGE_INLINE float hash01(int x, int y) {
-    uint32_t h = (uint32_t)(x * 374761393 + y * 668265263);
+    // All-unsigned arithmetic: the signed version was UBSan-un clean.
+    uint32_t h = (uint32_t)x * 374761393u + (uint32_t)y * 668265263u;
     h = (h ^ (h >> 13)) * 1274126177u;
     return ((h ^ (h >> 16)) >> 8) * (1.0f / 16777216.0f);
 }

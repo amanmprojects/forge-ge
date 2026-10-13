@@ -25,10 +25,13 @@ enum class Key : int {
 };
 
 enum class MouseButton : uint8_t { Left = 0, Right, Middle, X1, X2 };
+// Forge-local gamepad layout (NOT the SDL numeric order — Engine maps
+// SDL_GAMEPAD_BUTTON_* explicitly). A/B = south/east (Xbox layout).
 enum class GamepadButton : uint8_t {
     A = 0, B, X, Y, Back, Start, Guide,
     LeftStick, RightStick, LeftShoulder, RightShoulder,
-    DpadUp, DpadDown, DpadLeft, DpadRight
+    DpadUp, DpadDown, DpadLeft, DpadRight,
+    Count
 };
 
 class Input {
@@ -66,6 +69,7 @@ public:
 
     bool padDown(int pad, GamepadButton b) const;
     bool padPressed(int pad, GamepadButton b) const;
+    bool padReleased(int pad, GamepadButton b) const;
     float padAxis(int pad, int axis) const; // -1..1 (sticks), 0..1 (triggers)
     bool anyPadDown(GamepadButton b) const;
     int padCount() const;

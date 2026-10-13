@@ -75,6 +75,9 @@ void SpriteBatch::shutdown() {
 }
 
 void SpriteBatch::begin(const Mat4& viewProj) {
+    // If a previous batch was never ended, flush it under its own state
+    // (shader/VAO from that begin are still bound) instead of dropping quads.
+    if (quadCount_ > 0) flush();
     quadCount_ = 0;
     slotCount_ = 0;
     std::memset(slots_, 0, sizeof(slots_));
@@ -150,6 +153,9 @@ void SpriteBatch::flush() {
     for (int i = 0; i < slotCount_; ++i) {
         if (slots_[i]) slots_[i]->bind(i);
     }
+    // Orphan the buffer first: lets the driver hand us fresh storage instead
+    // of stalling the pipeline on the in-flight draw's VBO (786 KB/frame).
+    gl::glBufferData(GL_ARRAY_BUFFER, sizeof(Vertex) * MAX_VERTS, nullptr, GL_DYNAMIC_DRAW);
     gl::glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(Vertex) * quadCount_ * 4, mapped_);
     gl::glDrawElements(GL_TRIANGLES, quadCount_ * 6, GL_UNSIGNED_INT, nullptr);
     ++drawCalls_;
@@ -157,6 +163,7 @@ void SpriteBatch::flush() {
     quadCount_ = 0;
     slotCount_ = 0;
     std::memset(slots_, 0, sizeof(slots_));
+    gl::glActiveTexture(GL_TEXTURE0); // don't leak last slot into upload/FBO code
 }
 
 void SpriteBatch::end() {

@@ -89,6 +89,7 @@ static uint32_t compileStage(uint32_t type, const char* src) {
 
 bool Shader::load(const char* vertSrc, const char* fragSrc) {
     destroy();
+    if (!gl::isLoaded() || !vertSrc || !fragSrc) return false;
     uint32_t vs = compileStage(GL_VERTEX_SHADER, vertSrc);
     if (!vs) return false;
     uint32_t fs = compileStage(GL_FRAGMENT_SHADER, fragSrc);
@@ -137,15 +138,17 @@ bool Shader::loadFiles(const std::string& vertPath, const std::string& fragPath)
 }
 
 void Shader::destroy() {
-    if (id_) { gl::glDeleteProgram(id_); id_ = 0; }
+    if (id_ && gl::isLoaded()) gl::glDeleteProgram(id_);
+    id_ = 0;
     cache_.clear();
 }
 
 void Shader::bind() const {
-    if (id_) gl::glUseProgram(id_);
+    if (id_ && gl::isLoaded()) gl::glUseProgram(id_);
 }
 
 int Shader::uniformLoc(const char* name) {
+    if (!id_ || !gl::isLoaded()) return -1; // post-teardown safe
     auto it = cache_.find(name);
     if (it != cache_.end()) return it->second;
     int loc = (int)gl::glGetUniformLocation(id_, name);

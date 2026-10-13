@@ -5,6 +5,8 @@
 #include <sstream>
 #include <cctype>
 #include <cstring>
+#include <cstdint>
+#include <cmath>
 
 // ---- Minimal JSON parser (enough for Tiled exports) ----
 namespace {
@@ -140,23 +142,40 @@ bool Tilemap::loadTiledJson(const std::string& path) {
         return false;
     }
 
-    w_ = (int)root.find("width")->numOr(0);
-    h_ = (int)root.find("height")->numOr(0);
-    tileW_ = (int)root.find("tilewidth")->numOr(16);
-    tileH_ = (int)root.find("tileheight")->numOr(16);
+    w_ = 0; h_ = 0; tileW_ = 16; tileH_ = 16;
     layers_.clear();
 
+    const JVal* jw = root.find("width");
+    const JVal* jh = root.find("height");
+    const JVal* jtw = root.find("tilewidth");
+    const JVal* jth = root.find("tileheight");
+    if (!jw || !jh || !jtw || !jth ||
+        jw->type != JVal::Num || jh->type != JVal::Num ||
+        jtw->type != JVal::Num || jth->type != JVal::Num) {
+        FORGE_LOG_ERROR("Tilemap '%s': missing width/height/tilewidth/tileheight", path.c_str());
+        return false;
+    }
+    w_ = (int)jw->num; h_ = (int)jh->num;
+    tileW_ = (int)jtw->num; tileH_ = (int)jth->num;
+    if (w_ <= 0 || h_ <= 0 || tileW_ <= 0 || tileH_ <= 0) {
+        FORGE_LOG_ERROR("Tilemap '%s': invalid dimensions", path.c_str());
+        return false;
+    }
+
     // tileset image (first tileset with image)
+    int firstgid = 1;
     const JVal* sets = root.find("tilesets");
     if (sets && sets->type == JVal::Arr && !sets->arr.empty()) {
         const JVal& ts = sets->arr[0];
+        const JVal* fg = ts.find("firstgid");
+        if (fg && fg->type == JVal::Num) firstgid = (int)fg->num;
         const JVal* img = ts.find("image");
         if (img && img->type == JVal::Str) {
             tilesetPath_ = img->str;
             const JVal* cols = ts.find("columns");
             const JVal* count = ts.find("tilecount");
-            columns_ = cols ? (int)cols->numOr(0) : 0;
-            tileCount_ = count ? (int)count->numOr(0) : 0;
+            columns_ = (cols && cols->type == JVal::Num) ? (int)cols->num : 0;
+            tileCount_ = (count && count->type == JVal::Num) ? (int)count->num : 0;
         }
     }
 
@@ -177,8 +196,19 @@ bool Tilemap::loadTiledJson(const std::string& path) {
         l.tiles.assign((size_t)l.width * l.height, 0);
         const JVal* data = lj.find("data");
         if (data && data->type == JVal::Arr) {
-            for (size_t i = 0; i < data->arr.size() && i < l.tiles.size(); ++i)
-                l.tiles[i] = (int)data->arr[i].numOr(0);
+            // Tiled data is top-down with global ids (+ flip bits); Forge is
+            // Y-up with 1-based local ids. Flip rows and remap on load so
+            // draw/physics stay consistent. Only the first tileset is used.
+            for (size_t i = 0; i < data->arr.size() && i < l.tiles.size(); ++i) {
+                uint32_t raw = (uint32_t)data->arr[i].numOr(0);
+                raw &= ~(0xF0000000u); // mask flip/diagonal flags (rendered unflipped)
+                int gid = (int)raw;
+                int local = (gid == 0) ? 0 : (gid - firstgid + 1);
+                int sx = (int)(i % (size_t)l.width);
+                int sy = (int)(i / (size_t)l.width);
+                int dy = l.height - 1 - sy; // flip to Y-up
+                l.tiles[(size_t)dy * l.width + sx] = local;
+            }
         }
         layers_.push_back(std::move(l));
     }
@@ -218,8 +248,9 @@ bool Tilemap::isSolid(int tileId) const {
 std::vector<Rect> Tilemap::solidsInRect(Rect r) const {
     std::vector<Rect> out;
     if (layers_.empty()) return out;
-    int x0 = (int)(r.x / tileW_) - 1, x1 = (int)((r.x + r.w) / tileW_) + 1;
-    int y0 = (int)(r.y / tileH_) - 1, y1 = (int)((r.y + r.h) / tileH_) + 1;
+    // floor (not truncation): negative coords must round down
+    int x0 = (int)std::floor(r.x / tileW_) - 1, x1 = (int)std::floor((r.x + r.w) / tileW_) + 1;
+    int y0 = (int)std::floor(r.y / tileH_) - 1, y1 = (int)std::floor((r.y + r.h) / tileH_) + 1;
     for (auto& l : layers_) {
         if (!l.visible) continue;
         for (int y = y0; y <= y1; ++y)
@@ -237,8 +268,6 @@ bool Tilemap::collideRect(Rect r, Vec2* resolve) const {
     auto solids = solidsInRect(r);
     Vec2 total{0, 0};
     bool hit = false;
-    Circle c{r.center(), 0}; // use rect-vs-rect via overlap math
-    (void)c;
     for (auto& s : solids) {
         if (!r.overlaps(s)) continue;
         hit = true;
@@ -257,10 +286,10 @@ bool Tilemap::collideRect(Rect r, Vec2* resolve) const {
 
 Rect Tilemap::tileUv(int id) const {
     // id is 1-based; tileset row-major
+    if (id <= 0 || columns_ <= 0 || !tileset_) return {0, 0, 1, 1};
     int idx = id - 1;
-    int cx = columns_ > 0 ? idx % columns_ : 0;
-    int cy = columns_ > 0 ? idx / columns_ : 0;
-    if (!tileset_) return {0, 0, 1, 1};
+    int cx = idx % columns_;
+    int cy = idx / columns_;
     float tw = (float)tileset_->width(), th = (float)tileset_->height();
     float px = (float)cx * tileW_, py = (float)cy * tileH_;
     // Textures load flipped (flipY=true) so GL row 0 is image top.
@@ -270,10 +299,10 @@ Rect Tilemap::tileUv(int id) const {
 
 void Tilemap::draw(SpriteBatch& batch, Vec2 origin, Rect view) const {
     if (!tileset_ || !tileset_->valid() || layers_.empty()) return;
-    int x0 = (int)((view.x - origin.x) / tileW_) - 1;
-    int x1 = (int)((view.x + view.w - origin.x) / tileW_) + 1;
-    int y0 = (int)((view.y - origin.y) / tileH_) - 1;
-    int y1 = (int)((view.y + view.h - origin.y) / tileH_) + 1;
+    int x0 = (int)std::floor((view.x - origin.x) / tileW_) - 1;
+    int x1 = (int)std::floor((view.x + view.w - origin.x) / tileW_) + 1;
+    int y0 = (int)std::floor((view.y - origin.y) / tileH_) - 1;
+    int y1 = (int)std::floor((view.y + view.h - origin.y) / tileH_) + 1;
 
     for (auto& l : layers_) {
         if (!l.visible) continue;

@@ -16,14 +16,21 @@ void Scene::destroy(Entity e) { reg_.destroy(e); }
 void Scene::clear() { reg_.clear(); }
 
 void Scene::update(float dt) {
-    // scripts
-    reg_.view<Script>([&](Entity e, Script& s) {
-        if (!s.started) {
-            s.started = true;
-            if (s.onStart) s.onStart(e, reg_);
+    // Snapshot script owners first: user scripts may spawn/destroy entities,
+    // which would invalidate the view iteration (see Registry::view docs).
+    std::vector<Entity> scripts;
+    reg_.view<Script>([&](Entity e, Script&) { scripts.push_back(e); });
+    for (Entity e : scripts) {
+        if (!reg_.alive(e)) continue;
+        Script* s = reg_.tryGet<Script>(e);
+        if (!s) continue;
+        if (!s->started) {
+            s->started = true;
+            if (s->onStart) s->onStart(e, reg_);
+            if (!reg_.alive(e)) continue;
         }
-        if (s.onUpdate) s.onUpdate(e, reg_, dt);
-    });
+        if (s->onUpdate) s->onUpdate(e, reg_, dt);
+    }
     // velocity integration
     reg_.view<Transform, Velocity>([dt](Entity, Transform& t, Velocity& v) {
         v.v += v.accel * dt;
@@ -68,9 +75,9 @@ void Scene::draw(SpriteBatch& batch, const Camera2D* cam) {
 }
 
 Entity Scene::findByTag(const std::string& tag) {
-    Entity found = 0;
+    Entity found = kNullEntity;
     reg_.view<Tag>([&](Entity e, Tag& t) {
-        if (!found && t.name == tag) found = e;
+        if (found == kNullEntity && t.name == tag) found = e;
     });
     return found;
 }

@@ -20,6 +20,9 @@ struct EngineConfig {
     int maxSteps = 5;
     bool initAudio = true;
     bool quitOnEscape = false;
+    // Frame-rate cap for runFixed/runVariable (0 = uncapped). With vsync on
+    // the swap already paces; this is for vsync-off without busy-spinning.
+    int maxFps = 0;
 };
 
 class Engine {
@@ -40,8 +43,13 @@ public:
     AssetManager& assets() { return assets_; }
 
     // One-shot: pump events, begin batch. Returns false when quitting.
+    // Contract: if this returns false, do NOT call endFrame() (no batch was
+    // begun). Profiler/input bookkeeping is left balanced either way.
     bool beginFrame(const Mat4& viewProj);
     void endFrame();
+
+    // Clear the default framebuffer (helper so games don't touch GL directly).
+    void clear(float r, float g, float b, float a = 1.0f);
 
     // Full loop. update(dt) may be called 0..maxSteps times per frame.
     // render(alpha) draws with batch (begin/end handled by you or use beginFrame).
@@ -63,6 +71,7 @@ public:
 private:
     bool pumpEvents();
     bool initGL();
+    void pace(); // frame limiter (EngineConfig::maxFps)
 
     Window window_;
     Input input_;
@@ -75,6 +84,7 @@ private:
     bool glReady_ = false;
     bool quitting_ = false;
     void* gamepads_[4] = {};
+    uint64_t lastSwap_ = 0;
 };
 
 } // namespace forge

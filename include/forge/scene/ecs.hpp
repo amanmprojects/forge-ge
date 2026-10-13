@@ -12,12 +12,12 @@
 namespace forge {
 
 using Entity = uint32_t;
-inline constexpr Entity kNullEntity = 0;
+inline constexpr Entity kNullEntity = 0; // never issued: indices start at 1
 
-inline uint32_t entityIndex(Entity e) { return e & 0x00FFFFFFu; }
-inline uint32_t entityGen(Entity e) { return (e >> 24) & 0xFFu; }
+inline uint32_t entityIndex(Entity e) { return e & 0x000FFFFFu; }       // 20-bit index
+inline uint32_t entityGen(Entity e) { return (e >> 20) & 0xFFFu; }      // 12-bit generation
 inline Entity makeEntity(uint32_t idx, uint32_t gen) {
-    return (Entity)((gen << 24) | (idx & 0x00FFFFFFu));
+    return (Entity)(((gen & 0xFFFu) << 20) | (idx & 0x000FFFFFu));
 }
 
 class IPool {
@@ -68,12 +68,18 @@ public:
     }
 
     void removeAt(uint32_t denseIdx) override {
-        Entity moved = dense_.back();
-        dense_[denseIdx] = moved;
-        data_[denseIdx] = std::move(data_.back());
+        assert(denseIdx < dense_.size());
+        uint32_t last = (uint32_t)dense_.size() - 1;
+        Entity removed = dense_[denseIdx];
+        if (denseIdx != last) {
+            dense_[denseIdx] = dense_[last];
+            data_[denseIdx] = std::move(data_[last]);
+            sparse_[entityIndex(dense_[denseIdx])] = denseIdx;
+        }
         dense_.pop_back();
         data_.pop_back();
-        sparse_[entityIndex(moved)] = denseIdx;
+        if (entityIndex(removed) < sparse_.size())
+            sparse_[entityIndex(removed)] = kDenseNull;
     }
 
     void clearFor(Entity e) override { remove(e); }
@@ -99,27 +105,35 @@ public:
     Entity create() {
         uint32_t idx;
         if (!free_.empty()) { idx = free_.back(); free_.pop_back(); }
-        else { idx = nextIdx_++; alive_.push_back(0); }
-        uint32_t gen = alive_[idx];
-        return makeEntity(idx, gen);
+        else {
+            idx = nextIdx_;
+            if (idx == 0) idx = nextIdx_ = 1; // index 0 reserved: kNullEntity
+            if (idx >= alive_.size()) alive_.resize(idx + 1, 0);
+            nextIdx_ = idx + 1;
+        }
+        return makeEntity(idx, alive_[idx]);
     }
 
     void destroy(Entity e) {
-        uint32_t i = entityIndex(e);
-        if (i >= alive_.size() || alive_[i] != entityGen(e)) return; // stale
+        if (e == kNullEntity) return;
         for (auto& [ti, pool] : pools_) pool->clearFor(e);
-        alive_[i] = (alive_[i] + 1) & 0xFFu;
-        if (alive_[i] == 0) alive_[i] = 1; // skip gen 0 reuse confusion... 0 allowed; keep simple
+        uint32_t i = entityIndex(e);
+        // clearFor is gen-checked (no-op for stale handles), so clearing first
+        // also reaps orphans; the gen check below guards double-destroy recycle.
+        if (i >= alive_.size() || alive_[i] != entityGen(e)) return; // stale
+        alive_[i] = (alive_[i] + 1) & 0xFFFu;
         free_.push_back(i);
     }
 
     bool alive(Entity e) const {
+        if (e == kNullEntity) return false;
         uint32_t i = entityIndex(e);
-        return i < alive_.size() && alive_[i] == entityGen(e);
+        return i < alive_.size() && i != 0 && alive_[i] == entityGen(e);
     }
 
     template <typename T, typename... Args>
     T& emplace(Entity e, Args&&... args) {
+        assert(alive(e) && "Registry::emplace on dead/null entity");
         return pool<T>().emplace(e, std::forward<Args>(args)...);
     }
 
@@ -138,6 +152,8 @@ public:
     T* tryGet(Entity e) { auto& p = pool<T>(); return p.has(e) ? &p.get(e) : nullptr; }
 
     // View: iterate entities having all of Ts. Callback (Entity, Ts&...).
+    // The callback must NOT create/destroy entities or add/remove components
+    // (structural ops invalidate the iteration). Defer such ops until after.
     template <typename... Ts, typename Fn>
     void view(Fn&& fn) {
         auto& first = pool<First<Ts...>>();
@@ -165,7 +181,10 @@ public:
         nextIdx_ = 0;
     }
 
-    size_t entityCount() const { return nextIdx_ - free_.size(); }
+    size_t entityCount() const {
+        size_t issued = nextIdx_ > 0 ? (size_t)nextIdx_ - 1 : 0; // index 0 reserved
+        return issued >= free_.size() ? issued - free_.size() : 0;
+    }
 
 private:
     template <typename T, typename... Rest> struct FirstHelper { using type = T; };

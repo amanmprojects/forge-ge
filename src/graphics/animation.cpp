@@ -29,47 +29,58 @@ void Animator::addClip(const AnimClip& clip) {
 bool Animator::play(const std::string& name, bool restart) {
     auto it = clips_.find(name);
     if (it == clips_.end()) return false;
-    if (cur_ == &it->second && !restart) { playing_ = true; paused_ = false; return true; }
-    cur_ = &it->second;
+    if (curName_ == name && !restart) { playing_ = true; paused_ = false; return true; }
+    cur_ = &it->second; // refreshed below; clips_ must not rehash mid-play (see header)
+    curName_ = name;
     time_ = 0; frame_ = 0; fired_ = false;
     playing_ = true; paused_ = false;
     return true;
 }
 
+const AnimClip* Animator::current() const {
+    auto it = clips_.find(curName_);
+    return it != clips_.end() ? &it->second : nullptr;
+}
+
 void Animator::update(float dt) {
-    if (!playing_ || paused_ || !cur_ || cur_->frames.empty()) return;
+    const AnimClip* cur = current();
+    if (!playing_ || paused_ || !cur || cur->frames.empty()) return;
+    cur_ = cur;
     time_ += dt * speed_;
-    float dur = cur_->duration();
-    if (cur_->loop) {
+    float dur = cur->duration();
+    if (cur->loop) {
         while (time_ >= dur && dur > 0) time_ -= dur;
     } else if (time_ >= dur) {
         time_ = dur;
     }
-    int f = (int)(time_ * cur_->fps);
-    if (f >= (int)cur_->frames.size()) f = (int)cur_->frames.size() - 1;
+    int f = (int)(time_ * cur->fps);
+    if (f >= (int)cur->frames.size()) f = (int)cur->frames.size() - 1;
     if (f != frame_) {
         frame_ = f;
-        auto ev = events_.find(frame_);
+        auto ev = events_.find({curName_, frame_});
         if (ev != events_.end() && ev->second) ev->second();
     }
 }
 
 Rect Animator::currentFrame() const {
-    if (!cur_ || cur_->frames.empty()) return {0, 0, 0, 0};
+    const AnimClip* cur = current();
+    if (!cur || cur->frames.empty()) return {0, 0, 0, 0};
     int f = frame_;
     if (f < 0) f = 0;
-    if (f >= (int)cur_->frames.size()) f = (int)cur_->frames.size() - 1;
-    return cur_->frames[(size_t)f];
+    if (f >= (int)cur->frames.size()) f = (int)cur->frames.size() - 1;
+    return cur->frames[(size_t)f];
 }
 
 bool Animator::finished() const {
-    if (!cur_ || cur_->loop) return false;
-    return time_ >= cur_->duration();
+    const AnimClip* cur = current();
+    if (!cur || cur->loop) return false;
+    return time_ >= cur->duration();
 }
 
 void Animator::draw(SpriteBatch& batch, const Texture2D& tex, Vec2 pos, Vec2 size,
                     float rot, Color c, bool flipX) const {
-    if (!cur_ || cur_->frames.empty()) return;
+    const AnimClip* cur = current();
+    if (!cur || cur->frames.empty()) return;
     SpriteDraw d;
     d.tex = &tex;
     d.pos = pos; d.size = size; d.rotation = rot; d.color = c;
@@ -93,10 +104,12 @@ void Tween::update(float dt) {
             if (onDone) onDone();
             return;
         } else if (mode == TweenMode::Loop) {
-            elapsed = 0;
+            // Carry overflow into the next lap (no time loss on long frames)
+            elapsed = duration > 0 ? std::fmod(elapsed, duration) : 0.0f;
         } else { // PingPong
             std::swap(from, to);
-            elapsed = 0;
+            elapsed = duration > 0 ? (elapsed - duration) : 0.0f;
+            if (elapsed < 0) elapsed = 0;
         }
     }
     if (onUpdate) onUpdate(value());
@@ -116,10 +129,13 @@ int Tweens::add(const Tween& t) {
 void Tweens::update(float dt) {
     for (size_t i = 0; i < items_.size();) {
         items_[i].update(dt);
-        if (items_[i].done && items_[i].mode == TweenMode::Once)
-            items_[i] = std::move(items_.back()), items_.pop_back();
-        else
+        if (items_[i].done && items_[i].mode == TweenMode::Once) {
+            items_[i] = std::move(items_.back());
+            items_.pop_back();
+            // do NOT ++i: re-process the swapped-in element this frame
+        } else {
             ++i;
+        }
     }
 }
 

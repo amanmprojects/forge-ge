@@ -28,6 +28,7 @@ public:
     // ---- decoded sound data (shared, cached by AssetManager) ----
     SoundHandle loadFile(const std::string& path);
     SoundHandle loadMemory(const void* data, size_t len);
+    bool reloadFile(SoundHandle h, const std::string& path); // hot-reload
     void unload(SoundHandle h);
 
     // ---- playback ----

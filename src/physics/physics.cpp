@@ -80,8 +80,11 @@ bool PhysicsWorld::collide(const Body& a, const Body& b, Contact& out) {
 
 void PhysicsWorld::step(float dt) {
     if (dt <= 0) return;
-    // substep for stability at low fps
-    int sub = dt > 1.0f / 90.0f ? 2 : 1;
+    if (dt > 0.1f) dt = 0.1f; // clamp hitches: no tunneling past this budget
+    // Scale substeps so no body moves more than ~1/120s worth per substep.
+    int sub = (int)std::ceil(dt / (1.0f / 120.0f));
+    if (sub < 1) sub = 1;
+    if (sub > 8) sub = 8;
     float h = dt / sub;
 
     for (int s = 0; s < sub; ++s) {
@@ -101,24 +104,24 @@ void PhysicsWorld::step(float dt) {
         for (auto [i, j] : pairs) {
             Body& a = bodies_[(size_t)i];
             Body& b = bodies_[(size_t)j];
-            if (a.type == BodyType::Static && b.type == BodyType::Static) continue;
+            bool aStat = a.type == BodyType::Static;
+            bool bStat = b.type == BodyType::Static;
+            // Static-static pairs are at rest; still report sensors, else skip.
+            if (aStat && bStat && !a.sensor && !b.sensor) continue;
             Contact c;
             if (!collide(a, b, c)) continue;
-            if (contactCb_) contactCb_(c);
+            if (contactCb_) contactCb_(c); // fires for sensors too (incl. static)
+            if (a.sensor || b.sensor) continue;
 
+            // Inverse masses. Static = infinite. Kinematic = infinite vs
+            // dynamic (pushes them), finite vs static/kinematic (gets pushed
+            // out instead of tunneling through).
             bool aDyn = a.type == BodyType::Dynamic;
             bool bDyn = b.type == BodyType::Dynamic;
             bool aKin = a.type == BodyType::Kinematic;
             bool bKin = b.type == BodyType::Kinematic;
-            if (a.sensor || b.sensor) continue;
-            if (!aDyn && !bDyn && !aKin && !bKin) continue;
-
-            // positional correction, weighted by inverse mass (static = infinite mass)
-            float invA = aDyn ? 1.0f : 0.0f;
-            float invB = bDyn ? 1.0f : 0.0f;
-            // kinematics push dynamics fully
-            if (aKin && bDyn) { invA = 0; invB = 1; }
-            if (bKin && aDyn) { invA = 1; invB = 0; }
+            float invA = aDyn ? 1.0f : (aKin && !bDyn ? 1.0f : 0.0f);
+            float invB = bDyn ? 1.0f : (bKin && !aDyn ? 1.0f : 0.0f);
             float sum = invA + invB;
             if (sum <= 0) continue;
             Vec2 corr = c.normal * (c.penetration / sum);
@@ -136,9 +139,16 @@ void PhysicsWorld::step(float dt) {
                 a.vel += n * (jimp * invA);
                 b.vel -= n * (jimp * invB);
             }
-            // ground flags + friction
-            if (n.y > 0.7f && aDyn) { a.onGround = true; a.vel.x *= (1.0f - clamp01(a.friction)); }
-            if (n.y < -0.7f && bDyn) { b.onGround = true; b.vel.x *= (1.0f - clamp01(b.friction)); }
+            // ground flags + friction (friction scaled by substep so the
+            // result is frame-rate independent: f*h*60 ~= f at 60 Hz)
+            if (n.y > 0.7f && aDyn) {
+                a.onGround = true;
+                a.vel.x *= (1.0f - clamp01(a.friction * h * 60.0f));
+            }
+            if (n.y < -0.7f && bDyn) {
+                b.onGround = true;
+                b.vel.x *= (1.0f - clamp01(b.friction * h * 60.0f));
+            }
         }
     }
 }

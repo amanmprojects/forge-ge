@@ -1,7 +1,10 @@
 #pragma once
 // Physics: AABB bodies, spatial-hash broadphase, impulse-free arcade solver.
-// Deterministic, allocation-free step. Not a full rigid-body engine —
-// tuned for platformers / top-down 2D (stable stacking not guaranteed).
+// Deterministic, allocation-free step. Arcade-grade, NOT a full rigid-body
+// engine: unit masses, no rotation/torque, single relaxation pass per
+// substep (deep stacks may jitter), discrete collision (clamped dt +
+// substeps resist tunneling but very fast small bodies can still pass).
+// Tuned for platformers / top-down 2D.
 
 #include "forge/math/math.hpp"
 #include <vector>
@@ -42,11 +45,14 @@ public:
 
     void setGravity(Vec2 g) { gravity_ = g; }
     Vec2 gravity() const { return gravity_; }
-    void setCellSize(float s) { cellSize_ = s; }
+    void setCellSize(float s) { if (s > 0) cellSize_ = s; } // ignore <= 0
 
     uint32_t addBody(const Body& b);
     void removeBody(uint32_t id);
     void clear();
+    // NOTE: returned pointers alias internal storage; any addBody/removeBody
+    // may reallocate and invalidate them. Re-fetch after structural changes,
+    // or copy what you need.
     Body* get(uint32_t id);
     const Body* get(uint32_t id) const;
     size_t bodyCount() const { return bodies_.size(); }

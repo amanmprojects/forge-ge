@@ -6,10 +6,14 @@ Mat4 Camera2D::viewProj(int vpW, int vpH) const {
     Vec2 shake = shakeOffset();
     Vec2 pos = position + shake;
 
-    // view: translate(-pos) * rotate(-rot) * scale(zoom)
-    Mat4 view = Mat4::translate({-pos.x, -pos.y})
+    // Convention (must match screenToWorld/worldToScreen below):
+    //   view maps world -> centered Y-up screen as  S(zoom) * R(-rot) * T(-pos),
+    // i.e. translate into camera space FIRST, then rotate/zoom about the
+    // camera center. (Zooming about the world origin instead makes panning
+    // while zoomed drift and breaks picking.)
+    Mat4 view = Mat4::scale({zoom, zoom})
               * Mat4::rotate(-rotation)
-              * Mat4::scale({zoom, zoom});
+              * Mat4::translate({-pos.x, -pos.y});
     // proj: ortho centered on screen
     float hw = vpW * 0.5f, hh = vpH * 0.5f;
     Mat4 proj = Mat4::ortho(-hw, hw, -hh, hh);

@@ -7,6 +7,7 @@
 #include <unordered_map>
 #include <vector>
 #include <mutex>
+#include <atomic>
 #include <cstring>
 #include <cmath>
 
@@ -33,9 +34,9 @@ struct Voice {
     bool isMusic = false;
 };
 
-// Bus gains, read by the mixer thread. Float stores are atomic in practice;
-// API setters write them directly (benign race, no tearing on x86/ARM32+).
-static float gMaster = 1.0f, gMusic = 0.8f, gSfx = 1.0f;
+// Bus gains, read by the mixer thread. atomic: the callback runs on a
+// miniaudio-owned thread while API setters run on the game thread.
+static std::atomic<float> gMaster{1.0f}, gMusic{0.8f}, gSfx{1.0f};
 
 struct AudioEngine::Impl {
     ma_device device{};
@@ -81,8 +82,9 @@ static void dataCallback(ma_device* dev, void* out, const void* in, ma_uint32 fr
             // resample cursor advance (device rate vs sound rate * pitch)
             v.cursor += v.step * (double)s.sampleRate / (double)im->deviceRate;
 
-            float bus = v.isMusic ? gMusic : gSfx;
-            float g = v.volume * bus * gMaster;
+            float bus = v.isMusic ? gMusic.load(std::memory_order_relaxed)
+                                  : gSfx.load(std::memory_order_relaxed);
+            float g = v.volume * bus * gMaster.load(std::memory_order_relaxed);
             float l = g * (v.pan <= 0 ? 1.0f : 1.0f - v.pan);
             float r = g * (v.pan >= 0 ? 1.0f : 1.0f + v.pan);
             mixL += sl * l; mixR += sr * r;
@@ -124,7 +126,7 @@ bool AudioEngine::init() {
         return false;
     }
     deviceReady_ = true;
-    gMaster = masterVol_; gMusic = musicVol_; gSfx = sfxVol_;
+    gMaster.store(masterVol_); gMusic.store(musicVol_); gSfx.store(sfxVol_);
     FORGE_LOG_INFO("Audio ready: %u ch @ %u Hz", impl_->deviceChannels, impl_->deviceRate);
     return true;
 }
@@ -151,10 +153,16 @@ static bool decodeToS16(const void* data, size_t len, DecodedSound& out, bool is
     ma_decoder_get_length_in_pcm_frames(&dec, &frames);
     size_t cap = frames > 0 ? (size_t)frames : 4096;
     out.pcm.reserve(cap * (out.channels ? out.channels : 2));
-    int16_t tmp[4096 * 2];
+    // tmp holds 8192 samples; clamp frames/request for >stereo sources
+    // (5.1/7.1) so got*channels never overflows the buffer.
+    int16_t tmp[8192];
+    static_assert(sizeof(tmp) / sizeof(tmp[0]) == 8192, "tmp size");
+    uint32_t ch = out.channels ? out.channels : 1;
+    ma_uint64 perRead = 8192 / ch;
+    if (perRead < 1) perRead = 1;
     for (;;) {
         ma_uint64 got = 0;
-        ma_decoder_read_pcm_frames(&dec, tmp, 4096, &got);
+        ma_decoder_read_pcm_frames(&dec, tmp, perRead, &got);
         if (got == 0) break;
         size_t base = out.pcm.size();
         out.pcm.resize(base + (size_t)got * out.channels);
@@ -198,15 +206,19 @@ uint32_t AudioEngine::play(SoundHandle h, float volume, float pan, float pitch, 
     if (!h.valid()) return 0;
     std::lock_guard<std::mutex> lock(impl_->mutex);
     if (impl_->sounds.find(h.id) == impl_->sounds.end()) return 0;
-    // steal oldest inactive, else quietest active non-music
+    // Prefer an inactive voice; else steal the OLDEST active non-music voice
+    // (lowest id). Music voices are never stolen: stealing one would orphan
+    // musicVoice_ and leave it un-unstoppable via stopMusic().
     Voice* slot = nullptr;
     for (auto& v : impl_->voices)
         if (!v.active) { slot = &v; break; }
     if (!slot) {
-        slot = &impl_->voices[0];
-        for (auto& v : impl_->voices)
-            if (!v.isMusic && v.volume < slot->volume) slot = &v;
+        for (auto& v : impl_->voices) {
+            if (v.isMusic) continue;
+            if (!slot || v.id < slot->id) slot = &v;
+        }
     }
+    if (!slot) return 0; // all 32 voices hold music; caller may stopMusic() first
     slot->id = impl_->nextVoiceId++;
     slot->soundId = h.id;
     slot->cursor = 0;
@@ -245,9 +257,22 @@ bool AudioEngine::voicePlaying(uint32_t voice) const {
     return false;
 }
 
-void AudioEngine::setMasterVolume(float v) { masterVol_ = clampVol(v); gMaster = masterVol_; }
-void AudioEngine::setMusicVolume(float v) { musicVol_ = clampVol(v); gMusic = musicVol_; }
-void AudioEngine::setSfxVolume(float v) { sfxVol_ = clampVol(v); gSfx = sfxVol_; }
+void AudioEngine::setMasterVolume(float v) { masterVol_ = clampVol(v); gMaster.store(masterVol_); }
+void AudioEngine::setMusicVolume(float v) { musicVol_ = clampVol(v); gMusic.store(musicVol_); }
+void AudioEngine::setSfxVolume(float v) { sfxVol_ = clampVol(v); gSfx.store(sfxVol_); }
+
+// Re-decode `path` into an existing handle (asset hot-reload). Playing voices
+// keep their cursor (clamped by the mixer); looped music picks up new length.
+bool AudioEngine::reloadFile(SoundHandle h, const std::string& path) {
+    if (!h.valid()) return false;
+    DecodedSound s;
+    if (!decodeToS16(path.c_str(), 0, s, true)) return false;
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    auto it = impl_->sounds.find(h.id);
+    if (it == impl_->sounds.end()) return false;
+    it->second = std::move(s);
+    return true;
+}
 
 void AudioEngine::playMusic(SoundHandle h, float volume) {
     if (musicVoice_) stop(musicVoice_);

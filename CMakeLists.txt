@@ -6,20 +6,45 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_C_STANDARD 11)
 
-# Options
+# Options (FORGE_ENABLE_PROFILING drives the FORGE_PROFILING macro, always
+# defined to 0/1 so `#if FORGE_PROFILING` works without warnings)
 option(FORGE_BUILD_EXAMPLES "Build examples" ON)
 option(FORGE_BUILD_TESTS "Build tests" ON)
 option(FORGE_ENABLE_PROFILING "Enable internal profiler" ON)
 
 # Dependencies: SDL3 + OpenGL (system). Everything else is vendored.
-find_package(PkgConfig REQUIRED)
-pkg_check_modules(SDL3 REQUIRED sdl3)
+# Prefer a CMake SDL3 package, fall back to pkg-config.
+find_package(SDL3 QUIET)
+if(TARGET SDL3::SDL3)
+    set(FORGE_SDL_TARGET SDL3::SDL3)
+else()
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(SDL3 REQUIRED sdl3)
+endif()
 find_package(OpenGL REQUIRED)
 
-# ---- Engine library ----
-file(GLOB_RECURSE FORGE_SOURCES CONFIGURE_DEPENDS
-    "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp"
-    "${CMAKE_CURRENT_SOURCE_DIR}/src/*.c"
+# ---- Engine library (explicit sources: no glob surprises) ----
+set(FORGE_SOURCES
+    src/core/engine.cpp
+    src/core/input.cpp
+    src/core/logger.cpp
+    src/core/time.cpp
+    src/core/window.cpp
+    src/graphics/animation.cpp
+    src/graphics/camera.cpp
+    src/graphics/font.cpp
+    src/graphics/framebuffer.cpp
+    src/graphics/gl_loader.cpp
+    src/graphics/particles.cpp
+    src/graphics/shader.cpp
+    src/graphics/sprite_batch.cpp
+    src/graphics/texture.cpp
+    src/graphics/tilemap.cpp
+    src/physics/physics.cpp
+    src/scene/scene.cpp
+    src/assets/assets.cpp
+    src/audio/audio.cpp
+    src/utils/profiler.cpp
 )
 
 add_library(forge STATIC ${FORGE_SOURCES})
@@ -27,54 +52,60 @@ add_library(forge STATIC ${FORGE_SOURCES})
 target_include_directories(forge PUBLIC
     "${CMAKE_CURRENT_SOURCE_DIR}/include"
     "${CMAKE_CURRENT_SOURCE_DIR}/third_party"
-    ${SDL3_INCLUDE_DIRS}
     ${OPENGL_INCLUDE_DIRS}
 )
-
-target_compile_options(forge PUBLIC ${SDL3_CFLAGS_OTHER})
-target_link_directories(forge PUBLIC ${SDL3_LIBRARY_DIRS})
+if(DEFINED FORGE_SDL_TARGET)
+    target_link_libraries(forge PUBLIC ${FORGE_SDL_TARGET})
+else()
+    target_include_directories(forge PUBLIC ${SDL3_INCLUDE_DIRS})
+    target_compile_options(forge PUBLIC ${SDL3_CFLAGS_OTHER})
+    target_link_directories(forge PUBLIC ${SDL3_LIBRARY_DIRS})
+    target_link_libraries(forge PUBLIC ${SDL3_LIBRARIES})
+endif()
 target_link_libraries(forge PUBLIC
-    ${SDL3_LIBRARIES}
     OpenGL::GL
     m
     pthread
     dl
 )
 
-target_compile_options(forge PRIVATE -Wall -Wextra -Wpedantic -O3)
+target_compile_definitions(forge PUBLIC
+    FORGE_PROFILING=$<IF:$<BOOL:${FORGE_ENABLE_PROFILING}>,1,0>
+)
 
-if(FORGE_ENABLE_PROFILING)
-    target_compile_definitions(forge PUBLIC FORGE_PROFILING=1)
+target_compile_options(forge PRIVATE -Wall -Wextra -Wpedantic)
+target_compile_options(forge PRIVATE $<$<CONFIG:Release>:-O3>)
+
+# Sanitizers in Debug (compile AND link, symmetric — the old setup linked
+# PUBLIC but compiled PRIVATE, breaking downstream ASan builds).
+if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+    target_compile_options(forge PUBLIC -g -O1 -fsanitize=address,undefined -fno-omit-frame-pointer)
+    target_link_options(forge PUBLIC -fsanitize=address,undefined)
 endif()
-
-# Strict in debug
-target_compile_options(forge PRIVATE
-    $<$<CONFIG:Debug>:-g -O0 -fsanitize=address,undefined -fno-omit-frame-pointer>
-)
-target_link_options(forge PUBLIC
-    $<$<CONFIG:Debug>:-fsanitize=address,undefined>
-)
 
 # ---- Examples ----
 if(FORGE_BUILD_EXAMPLES)
-    file(GLOB EXAMPLE_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/examples/*.cpp")
-    foreach(src ${EXAMPLE_SOURCES})
+    set(FORGE_EXAMPLES
+        examples/01_hello.cpp
+        examples/02_platformer.cpp
+        examples/03_benchmark.cpp
+        examples/04_audio.cpp
+        examples/05_scene.cpp
+        examples/06_verify.cpp
+    )
+    foreach(src ${FORGE_EXAMPLES})
         get_filename_component(name "${src}" NAME_WE)
         add_executable("${name}" "${src}")
         target_link_libraries("${name}" PRIVATE forge)
-        target_compile_options("${name}" PRIVATE -Wall -Wextra -O2)
+        target_compile_options("${name}" PRIVATE -Wall -Wextra)
     endforeach()
 endif()
 
 # ---- Tests ----
 if(FORGE_BUILD_TESTS)
     enable_testing()
-    file(GLOB TEST_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/tests/*.cpp")
-    foreach(src ${TEST_SOURCES})
-        get_filename_component(name "${src}" NAME_WE)
-        add_executable("${name}" "${src}")
-        target_link_libraries("${name}" PRIVATE forge)
-        target_compile_options("${name}" PRIVATE -Wall -Wextra -O2)
-        add_test(NAME "${name}" COMMAND "${name}")
-    endforeach()
+    add_executable(test_engine tests/test_engine.cpp)
+    target_link_libraries(test_engine PRIVATE forge)
+    target_compile_options(test_engine PRIVATE -Wall -Wextra)
+    add_test(NAME test_engine COMMAND test_engine)
 endif()

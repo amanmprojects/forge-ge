@@ -1,6 +1,6 @@
 #pragma once
 // AssetManager: cached textures/fonts/sounds with hot-reload (mtime check).
-// Call update() once per frame (or every N frames) to reload changed files.
+// update() throttles filesystem checks to ~2 Hz; hotReload() forces a check.
 
 #include "forge/graphics/texture.hpp"
 #include "forge/graphics/font.hpp"
@@ -8,6 +8,7 @@
 #include <string>
 #include <unordered_map>
 #include <memory>
+#include <chrono>
 
 namespace forge {
 
@@ -28,18 +29,19 @@ public:
     void unloadTexture(const std::string& path);
     void clear(); // unload everything
 
-    // Hot reload: re-load textures/fonts whose mtime changed. Returns count.
+    // Hot reload: re-load assets whose mtime changed. Returns count.
+    // Covers textures, fonts AND sounds (sounds re-decode in place).
     int hotReload();
 
     void setHotReload(bool on) { hotReload_ = on; }
-    void update(); // calls hotReload() if enabled
+    void update(); // throttled hotReload() if enabled
 
     size_t textureCount() const { return textures_.size(); }
 
 private:
     struct TexEntry {
         std::unique_ptr<Texture2D> tex;
-        int64_t mtime = 0;
+        int64_t mtime = 0; // nanoseconds (Linux) — catches sub-second saves
         TextureFilter filter = TextureFilter::Linear;
     };
     struct FontEntry {
@@ -47,13 +49,18 @@ private:
         int64_t mtime = 0;
         float px = 32;
     };
+    struct SoundEntry {
+        SoundHandle handle;
+        int64_t mtime = 0;
+    };
     static int64_t fileMtime(const std::string& path);
 
     AudioEngine* audio_ = nullptr;
     std::unordered_map<std::string, TexEntry> textures_;
     std::unordered_map<std::string, FontEntry> fonts_;
-    std::unordered_map<std::string, SoundHandle> sounds_;
+    std::unordered_map<std::string, SoundEntry> sounds_;
     bool hotReload_ = true;
+    std::chrono::steady_clock::time_point lastCheck_{};
 };
 
 } // namespace forge

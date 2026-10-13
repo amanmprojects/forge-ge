@@ -24,7 +24,12 @@ class Tilemap {
 public:
     Tilemap() = default;
 
-    // Procedural grid (for tests / prototyping)
+    // Coordinate convention: Y-up, tile (0,0) is the BOTTOM-left.
+    // - create/setTile/tile use Y-up directly.
+    // - loadCsv: row 0 of the CSV is the BOTTOM row (first values = y 0).
+    // - loadTiledJson: Tiled data is top-down; rows are flipped on load so
+    //   Tiled's top row becomes y = height-1. Only the first tileset is used
+    //   (firstgid remapped); tile flip flags are masked (rendered unflipped).
     void create(int w, int h, int tileW, int tileH);
     bool loadTiledJson(const std::string& path);   // needs tileset texture set after
     bool loadCsv(const std::string& csv, int w, int h, int tileW, int tileH);

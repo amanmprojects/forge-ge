@@ -1,6 +1,8 @@
 #include "forge/assets/assets.hpp"
 #include "forge/core/logger.hpp"
 #include <sys/stat.h>
+#include <chrono>
+#include <cstring>
 
 namespace forge {
 
@@ -9,12 +11,28 @@ AssetManager::AssetManager(AudioEngine* audio) : audio_(audio) {}
 int64_t AssetManager::fileMtime(const std::string& path) {
     struct stat st{};
     if (::stat(path.c_str(), &st) != 0) return 0;
-    return (int64_t)st.st_mtime;
+#if defined(__linux__)
+    return (int64_t)st.st_mtim.tv_sec * 1000000000LL + (int64_t)st.st_mtim.tv_nsec;
+#else
+    return (int64_t)st.st_mtime * 1000000000LL; // second granularity elsewhere
+#endif
 }
 
 Texture2D* AssetManager::loadTexture(const std::string& path, TextureFilter filter) {
     auto it = textures_.find(path);
-    if (it != textures_.end()) return it->second.tex.get();
+    // Cache is filter-aware: a different filter re-uploads in place so all
+    // existing pointers keep working with the new sampling.
+    if (it != textures_.end()) {
+        if (it->second.filter != filter) {
+            Texture2D tmp;
+            if (tmp.loadFile(path, true, filter)) {
+                *it->second.tex = std::move(tmp);
+                it->second.filter = filter;
+                it->second.mtime = fileMtime(path);
+            }
+        }
+        return it->second.tex.get();
+    }
     auto tex = std::make_unique<Texture2D>();
     if (!tex->loadFile(path, true, filter)) return nullptr;
     Texture2D* ptr = tex.get();
@@ -24,7 +42,11 @@ Texture2D* AssetManager::loadTexture(const std::string& path, TextureFilter filt
 }
 
 Font* AssetManager::loadFont(const std::string& path, float pxHeight) {
-    std::string key = path + "#" + std::to_string((int)pxHeight);
+    // Float-safe key: hash the bit pattern, not a truncated int cast.
+    uint32_t bits = 0;
+    static_assert(sizeof(bits) == sizeof(pxHeight), "float size");
+    std::memcpy(&bits, &pxHeight, sizeof(bits));
+    std::string key = path + "#" + std::to_string(bits);
     auto it = fonts_.find(key);
     if (it != fonts_.end()) return it->second.font.get();
     auto f = std::make_unique<Font>();
@@ -36,13 +58,13 @@ Font* AssetManager::loadFont(const std::string& path, float pxHeight) {
 
 SoundHandle AssetManager::loadSound(const std::string& path) {
     auto it = sounds_.find(path);
-    if (it != sounds_.end()) return it->second;
+    if (it != sounds_.end()) return it->second.handle;
     if (!audio_) {
         FORGE_LOG_ERROR("Asset: no AudioEngine for '%s'", path.c_str());
         return {};
     }
     SoundHandle h = audio_->loadFile(path);
-    if (h.valid()) sounds_[path] = h;
+    if (h.valid()) sounds_[path] = SoundEntry{h, fileMtime(path)};
     return h;
 }
 
@@ -54,7 +76,7 @@ void AssetManager::clear() {
     textures_.clear();
     fonts_.clear();
     if (audio_) {
-        for (auto& kv : sounds_) audio_->unload(kv.second);
+        for (auto& kv : sounds_) audio_->unload(kv.second.handle);
     }
     sounds_.clear();
 }
@@ -85,11 +107,28 @@ int AssetManager::hotReload() {
             }
         }
     }
+    if (audio_) {
+        for (auto& kv : sounds_) {
+            int64_t mt = fileMtime(kv.first);
+            if (mt > kv.second.mtime) {
+                if (audio_->reloadFile(kv.second.handle, kv.first)) {
+                    kv.second.mtime = mt;
+                    ++n;
+                    FORGE_LOG_INFO("Hot-reload: '%s'", kv.first.c_str());
+                }
+            }
+        }
+    }
     return n;
 }
 
 void AssetManager::update() {
-    if (hotReload_) hotReload();
+    if (!hotReload_) return;
+    // Throttle: stat() every asset at most twice per second, not every frame.
+    auto now = std::chrono::steady_clock::now();
+    if (now - lastCheck_ < std::chrono::milliseconds(500)) return;
+    lastCheck_ = now;
+    hotReload();
 }
 
 } // namespace forge

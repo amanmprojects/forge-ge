@@ -11,7 +11,9 @@ One static library, one umbrella header, six runnable examples.
 header-only JSON frameworks.
 
 Measured on Mesa/NVIDIA (144 Hz): **10,000 rotating sprites at 144 fps in
-2 draw calls** (`03_benchmark`, `avgDraw ≈ 1 ms`).
+2 draw calls** (`03_benchmark`, `avgDraw ≈ 1 ms`). Batches flush per 8192
+quads or 16 distinct textures, so multi-texture scenes use a few more calls —
+still one per flush, never one per sprite.
 
 ## Batteries included
 
@@ -49,11 +51,19 @@ ctest --test-dir build          # headless unit tests (math/ecs/physics/tilemap/
 ./build/02_platformer           # physics platformer (arrows/space, R resets)
 ./build/04_audio                # synthesized SFX (1/2/3, M for music)
 ./build/05_scene                # 60-entity ECS swarm (SPACE pulse)
-./build/06_verify               # render-correctness self-test (exit 0 = pixels exact)
+./build/06_verify               # render-correctness self-test (exit 0 = colors/positions/batch within tolerance)
 ```
 
 CMake options: `-DFORGE_BUILD_EXAMPLES=OFF`, `-DFORGE_BUILD_TESTS=OFF`,
-`-DFORGE_ENABLE_PROFILING=OFF`.
+`-DFORGE_ENABLE_PROFILING=OFF` (the CMake *option*;
+the code macro it drives is `FORGE_PROFILING`, always defined 0/1).
+
+## Threading
+
+All Forge APIs are **main-thread only** unless noted: GL objects, the
+mixer-facing `AudioEngine` setters (lock-free atomics under the hood),
+and `Engine::run*` must live on the thread that created the `Engine`.
+`AssetManager::update()` is throttled to ~2 Hz filesystem checks.
 
 ## Quickstart
 
@@ -104,6 +114,9 @@ g++ -std=c++20 game.cpp -o game -I path/to/forge/include -I path/to/forge/third_
 forge::PhysicsWorld world;
 world.setGravity({0, -2200});
 // ... add bodies ...
+// Arcade solver limits: unit masses, no rotation, single relaxation pass,
+// discrete collision (dt clamped to 0.1 s + auto-substeps). Great for
+// platformers; not a stacking/rigid-body engine.
 engine.runFixed(
     [&](float dt) { world.step(dt); /* gameplay */ },
     [&]           { /* render with engine.batch() */ });
@@ -120,7 +133,6 @@ scene.registry().emplace<forge::Velocity>(e, forge::Velocity{{60, 0}});
 ```
 
 ## Design notes (why it's fast)
-
 - **One VBO, one shader, minimal state changes.** `SpriteBatch` packs up to
   8192 quads per flush across 16 texture slots; shapes, text and particles all
   ride the same batch — the benchmark draws 10k sprites in 2 draw calls.

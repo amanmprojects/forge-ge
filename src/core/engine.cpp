@@ -32,15 +32,18 @@ Engine::Engine(const EngineConfig& cfg) : cfg_(cfg), stepper_(cfg.fixedStep, cfg
     // open gamepads
     int n = 0;
     SDL_JoystickID* ids = SDL_GetGamepads(&n);
-    for (int i = 0; i < n && i < 4; ++i) {
-        SDL_Gamepad* gp = SDL_OpenGamepad(ids[i]);
-        if (gp) {
-            gamepads_[i] = gp;
-            input_.connectGamepad(i);
-            FORGE_LOG_INFO("Gamepad %d: %s", i, SDL_GetGamepadName(gp));
+    if (ids) {
+        for (int i = 0; i < n && i < 4; ++i) {
+            SDL_Gamepad* gp = SDL_OpenGamepad(ids[i]);
+            if (gp) {
+                gamepads_[i] = gp;
+                input_.connectGamepad(i);
+                FORGE_LOG_INFO("Gamepad %d: %s", i, SDL_GetGamepadName(gp));
+            }
         }
+        SDL_free(ids);
     }
-    SDL_free(ids);
+    SDL_StartTextInput((SDL_Window*)window_.nativeHandle());
     glReady_ = true;
     FORGE_LOG_INFO("Forge engine ready");
 }
@@ -82,6 +85,30 @@ static MouseButton sdlToMouse(uint8_t b) {
         case SDL_BUTTON_MIDDLE: return MouseButton::Middle;
         case SDL_BUTTON_X1: return MouseButton::X1;
         default: return MouseButton::X2;
+    }
+}
+
+// Explicit map: SDL3 numeric order is ...BACK(4), GUIDE(5), START(6)...
+// which does NOT match Forge's ...Back, Start, Guide... — never C-cast.
+static bool sdlToPad(uint8_t sdl, GamepadButton& out) {
+    using G = GamepadButton;
+    switch (sdl) {
+        case SDL_GAMEPAD_BUTTON_SOUTH: out = G::A; return true;
+        case SDL_GAMEPAD_BUTTON_EAST: out = G::B; return true;
+        case SDL_GAMEPAD_BUTTON_WEST: out = G::X; return true;
+        case SDL_GAMEPAD_BUTTON_NORTH: out = G::Y; return true;
+        case SDL_GAMEPAD_BUTTON_BACK: out = G::Back; return true;
+        case SDL_GAMEPAD_BUTTON_GUIDE: out = G::Guide; return true;
+        case SDL_GAMEPAD_BUTTON_START: out = G::Start; return true;
+        case SDL_GAMEPAD_BUTTON_LEFT_STICK: out = G::LeftStick; return true;
+        case SDL_GAMEPAD_BUTTON_RIGHT_STICK: out = G::RightStick; return true;
+        case SDL_GAMEPAD_BUTTON_LEFT_SHOULDER: out = G::LeftShoulder; return true;
+        case SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER: out = G::RightShoulder; return true;
+        case SDL_GAMEPAD_BUTTON_DPAD_UP: out = G::DpadUp; return true;
+        case SDL_GAMEPAD_BUTTON_DPAD_DOWN: out = G::DpadDown; return true;
+        case SDL_GAMEPAD_BUTTON_DPAD_LEFT: out = G::DpadLeft; return true;
+        case SDL_GAMEPAD_BUTTON_DPAD_RIGHT: out = G::DpadRight; return true;
+        default: return false; // MISC1, paddles: no Forge equivalent (yet)
     }
 }
 
@@ -160,8 +187,11 @@ bool Engine::pumpEvents() {
                         slot = i; break;
                     }
                 }
-                if (slot >= 0 && ev.gbutton.button < 14)
-                    input_.setGamepadButton(slot, (GamepadButton)ev.gbutton.button, ev.gbutton.down);
+                if (slot >= 0) {
+                    GamepadButton fb;
+                    if (sdlToPad(ev.gbutton.button, fb))
+                        input_.setGamepadButton(slot, fb, ev.gbutton.down);
+                }
                 break;
             }
             case SDL_EVENT_GAMEPAD_AXIS_MOTION: {
@@ -197,7 +227,10 @@ bool Engine::pumpEvents() {
 bool Engine::beginFrame(const Mat4& viewProj) {
     Profiler::instance().beginFrame();
     input_.beginFrame();
-    if (!pumpEvents()) return false;
+    if (!pumpEvents()) {
+        Profiler::instance().endFrame(); // keep profiler balanced on quit path
+        return false;
+    }
     float dt = time_.tick();
     (void)dt;
     batch_.resetStats();
@@ -211,6 +244,28 @@ void Engine::endFrame() {
     batch_.end();
     window_.swapBuffers();
     Profiler::instance().endFrame();
+}
+
+void Engine::clear(float r, float g, float b, float a) {
+    IVec2 vp = viewport();
+    gl::glViewport(0, 0, vp.x, vp.y);
+    gl::glClearColor(r, g, b, a);
+    gl::glClear(GL_COLOR_BUFFER_BIT);
+}
+
+void Engine::pace() {
+    if (cfg_.maxFps <= 0) return;
+    // Runs AFTER swap: sleep the remainder of the frame budget. Only useful
+    // with vsync off (with vsync on the swap already blocks).
+    uint64_t now = SDL_GetPerformanceCounter();
+    uint64_t freq = SDL_GetPerformanceFrequency();
+    double elapsed = (double)(now - lastSwap_) / (double)freq;
+    double budget = 1.0 / (double)cfg_.maxFps;
+    if (elapsed < budget) {
+        uint64_t ns = (uint64_t)((budget - elapsed) * 1e9);
+        if (ns > 0) SDL_DelayNS(ns);
+    }
+    lastSwap_ = SDL_GetPerformanceCounter();
 }
 
 void Engine::runFixed(std::function<void(float)> update, std::function<void()> render) {
@@ -231,6 +286,7 @@ void Engine::runFixed(std::function<void(float)> update, std::function<void()> r
             render();
         }
         window_.swapBuffers();
+        pace();
         Profiler::instance().endFrame();
         assets_.update();
     }
@@ -245,6 +301,7 @@ void Engine::runVariable(std::function<void(float)> frame) {
         batch_.resetStats();
         frame(dt);
         window_.swapBuffers();
+        pace();
         Profiler::instance().endFrame();
         assets_.update();
     }

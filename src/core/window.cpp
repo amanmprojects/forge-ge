@@ -45,6 +45,9 @@ void Window::create(const WindowConfig& cfg) {
     if (cfg.msaaSamples > 0) {
         SDL_GL_SetAttribute(SDL_GL_MULTISAMPLEBUFFERS, 1);
         SDL_GL_SetAttribute(SDL_GL_MULTISAMPLESAMPLES, cfg.msaaSamples);
+    } else {
+        SDL_GL_SetAttribute(SDL_GL_MULTISAMPLEBUFFERS, 0);
+        SDL_GL_SetAttribute(SDL_GL_MULTISAMPLESAMPLES, 0);
     }
 
     SDL_WindowFlags flags = SDL_WINDOW_OPENGL;
@@ -87,12 +90,15 @@ void Window::setTitle(const std::string& t) {
 }
 
 void Window::setVSync(bool on) {
-    vsync_ = on;
     if (window_) {
-        if (!SDL_GL_SetSwapInterval(on ? 1 : 0)) {
-            // Fallback: late swap tearing / immediate
-            SDL_GL_SetSwapInterval(0);
-        }
+        if (!SDL_GL_SetSwapInterval(on ? 1 : 0))
+            SDL_GL_SetSwapInterval(0); // fallback to immediate
+        // Cache what the driver actually gave us, not what we asked for.
+        int actual = 0;
+        if (SDL_GL_GetSwapInterval(&actual)) vsync_ = (actual != 0);
+        else vsync_ = false;
+    } else {
+        vsync_ = on;
     }
 }
 
@@ -116,7 +122,8 @@ float Window::dpiScale() const {
 }
 
 void Window::onResize(int w, int h) {
-    w_ = w; h_ = h;
+    w_ = w > 0 ? w : 1; // minimized windows can report 0; keep ortho valid
+    h_ = h > 0 ? h : 1;
 }
 
 } // namespace forge
