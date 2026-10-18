@@ -113,6 +113,7 @@ if(FORGE_BUILD_EXAMPLES)
         examples/04_audio.cpp
         examples/05_scene.cpp
         examples/06_verify.cpp
+        examples/07_breakout.cpp
     )
     foreach(src ${FORGE_EXAMPLES})
         get_filename_component(name "${src}" NAME_WE)
