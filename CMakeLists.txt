@@ -114,6 +114,7 @@ if(FORGE_BUILD_EXAMPLES)
         examples/05_scene.cpp
         examples/06_verify.cpp
         examples/07_breakout.cpp
+        examples/08_snake.cpp
     )
     foreach(src ${FORGE_EXAMPLES})
         get_filename_component(name "${src}" NAME_WE)

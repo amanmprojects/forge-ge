@@ -3,7 +3,7 @@
 # Forge — a batteries-included 2D game engine in C++
 
 Forge is a high-performance, dependency-light C++20 engine for 2D games.
-One static library, one umbrella header, seven runnable examples.
+One static library, one umbrella header, eight runnable examples.
 
 **System dependencies: SDL3 + OpenGL only.** Everything else
 (`stb_image`, `stb_truetype`, `miniaudio`, the GL loader) is vendored in
@@ -53,6 +53,7 @@ ctest --test-dir build          # headless unit tests (math/ecs/physics/tilemap/
 ./build/05_scene                # 60-entity ECS swarm + falling crates (SPACE pulse)
 ./build/06_verify               # render-correctness self-test (exit 0 = colors/positions/batch within tolerance)
 ./build/07_breakout             # Atari Breakout (A/D · arrows · mouse · gamepad, SPACE launch, ESC pause)
+./build/08_snake                # classic Snake (WASD/arrows/gamepad, ESC pause, golden apples, bot demo)
 ```
 
 CMake options: `-DFORGE_BUILD_EXAMPLES=OFF`, `-DFORGE_BUILD_TESTS=OFF`,
@@ -61,11 +62,11 @@ the code macro it drives is `FORGE_PROFILING`, always defined 0/1),
 `-DFORGE_ENABLE_SANITIZERS=ON|OFF` (ASan+UBSan; default ON for single-config
 Debug builds).
 
-### Headless capture (`07_breakout`)
+### Headless capture (`07_breakout`, `08_snake`)
 
-`07_breakout` doubles as a render/sim test: with `--shot` it runs N fixed 1/60 s
-steps under a scripted autopilot, renders the final frame into an offscreen
-`Framebuffer` and writes a PNG. Everything is seeded (`--seed`) and clock-free,
+Both games double as render/sim tests: with `--shot` they run N fixed 1/60 s
+steps under a scripted autopilot, render the final frame into an offscreen
+`Framebuffer` and write a PNG. Everything is seeded (`--seed`) and clock-free,
 so the same arguments reproduce the same pixels — usable as a screenshot test.
 
 ```bash
@@ -75,18 +76,27 @@ so the same arguments reproduce the same pixels — usable as a screenshot test.
 ./build/07_breakout --shot paused.png --frames 700 --pause-at 400 # pause overlay
 ./build/07_breakout --demo                                       # just watch the bot play
 CI=1 ./build/07_breakout --frames 240                            # smoke run, exit 0/1
+
+./build/08_snake --shot play.png --frames 700                    # mid-game
+./build/08_snake --shot title.png --title                        # title + bot demo
+./build/08_snake --shot over.png --frames 400 --no-ai            # death -> game over
+./build/08_snake --shot paused.png --frames 500 --pause-at 450   # pause overlay
+./build/08_snake --demo                                          # watch the autopilot play
+CI=1 ./build/08_snake --frames 240                               # smoke run, exit 0/1
 ```
 
 Text is drawn with a TTF picked from the usual system paths (DejaVu Sans Mono
 Bold, Adwaita Mono, Liberation Mono, Noto, Menlo, Consolas). If none is found
 the HUD and menus fall back to shape-only and the game stays playable — the
-game ships no asset files of its own; bricks, HUD and SFX are all procedural.
+examples ship no asset files of their own; sprites, HUD and SFX are all
+procedural.
 
-`--shot` also prints `sane=0|1` from an invariant check (no NaN, ball/paddle
-inside the field, speed capped) and exits non-zero if it trips or the PNG
-fails to write — so a CI job can assert the game still simulates and renders
-instead of eyeballing screenshots. Run `./build/07_breakout --help` for the
-full flag list (`--size`, `--level`, `--no-ai`, `--sloppy`, …).
+`--shot` also prints `sane=0|1` from an invariant check (Breakout: no NaN,
+ball/paddle inside the field, speed capped; Snake: no NaN timers, body/food
+inside the grid, step time in range) and exits non-zero if it trips or the
+PNG fails to write — so a CI job can assert the games still simulate and
+render instead of eyeballing screenshots. Run `--help` on either example for
+the full flag list (`--size`, `--no-ai`, `--sloppy`, …).
 
 ## Threading
 
@@ -184,7 +194,7 @@ scene.registry().emplace<forge::Velocity>(e, forge::Velocity{{60, 0}});
 include/forge/   public headers (forge.hpp umbrella)
 src/             implementations (core, graphics, physics, audio, scene, assets, utils)
 third_party/     stb_image, stb_truetype, stb_image_write, miniaudio (vendored)
-examples/        01_hello … 07_breakout
+examples/        01_hello … 08_snake
 tests/           headless unit tests (ctest)
 ```
 
