@@ -107,8 +107,11 @@ void Tween::update(float dt) {
             // Carry overflow into the next lap (no time loss on long frames)
             elapsed = duration > 0 ? std::fmod(elapsed, duration) : 0.0f;
         } else { // PingPong
+            // Carry the overflow into the next leg (a long frame can even
+            // cross several legs at once) so no time is lost.
+            elapsed -= duration;
             std::swap(from, to);
-            elapsed = duration > 0 ? (elapsed - duration) : 0.0f;
+            while (duration > 0 && elapsed >= duration) { elapsed -= duration; std::swap(from, to); }
             if (elapsed < 0) elapsed = 0;
         }
     }

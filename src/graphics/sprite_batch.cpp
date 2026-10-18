@@ -75,9 +75,39 @@ void SpriteBatch::shutdown() {
 }
 
 void SpriteBatch::begin(const Mat4& viewProj) {
+    // Track the render target: an un-ended batch must flush into the
+    // framebuffer/viewport it was drawn for, not whatever is bound now (e.g.
+    // a batch left open while drawing into an FBO, then begin() for the
+    // screen). The uniforms from that begin are still bound, so flush() is
+    // already faithful; only the FBO and viewport need restoring.
+    uint32_t curFbo = 0;
+    GLint curVp[4] = {0, 0, 0, 0};
+    if (gl::glGetIntegerv) {
+        GLint f = 0;
+        gl::glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &f);
+        gl::glGetIntegerv(GL_VIEWPORT, curVp);
+        curFbo = (uint32_t)f;
+    }
     // If a previous batch was never ended, flush it under its own state
-    // (shader/VAO from that begin are still bound) instead of dropping quads.
-    if (quadCount_ > 0) flush();
+    // instead of dropping the quads or landing them in the wrong target.
+    if (quadCount_ > 0) {
+        bool targetMoved = curFbo != boundFbo_ ||
+                           std::memcmp(curVp, boundVp_, sizeof(curVp)) != 0;
+        if (targetMoved) {
+            FORGE_LOG_WARN("SpriteBatch::begin: previous batch was not ended; "
+                           "flushing into its target (fbo %u) + viewport",
+                           boundFbo_);
+            gl::glBindFramebuffer(GL_FRAMEBUFFER, boundFbo_);
+            gl::glViewport(boundVp_[0], boundVp_[1], boundVp_[2], boundVp_[3]);
+            flush();
+            gl::glBindFramebuffer(GL_FRAMEBUFFER, curFbo);
+            gl::glViewport(curVp[0], curVp[1], curVp[2], curVp[3]);
+        } else {
+            flush();
+        }
+    }
+    boundFbo_ = curFbo;
+    for (int i = 0; i < 4; ++i) boundVp_[i] = curVp[i];
     quadCount_ = 0;
     slotCount_ = 0;
     std::memset(slots_, 0, sizeof(slots_));

@@ -1,6 +1,8 @@
 #include "forge/scene/scene.hpp"
 #include "forge/graphics/sprite_batch.hpp"
 #include <algorithm>
+#include <cmath>
+#include <cstdint>
 #include <vector>
 
 namespace forge {
@@ -12,8 +14,74 @@ Entity Scene::create(const std::string& tag) {
     return e;
 }
 
-void Scene::destroy(Entity e) { reg_.destroy(e); }
-void Scene::clear() { reg_.clear(); }
+void Scene::destroy(Entity e) {
+    auto it = bodyIds_.find(e);
+    if (it != bodyIds_.end()) {
+        physics_.removeBody(it->second);
+        bodyIds_.erase(it);
+    }
+    reg_.destroy(e);
+}
+
+void Scene::clear() {
+    physics_.clear();
+    bodyIds_.clear();
+    reg_.clear();
+}
+
+void Scene::syncPhysics() {
+    // Retract bodies whose entity died or lost Transform/Collider.
+    for (auto it = bodyIds_.begin(); it != bodyIds_.end();) {
+        Entity e = it->first;
+        if (!reg_.alive(e) || !reg_.has<Collider>(e) || !reg_.has<Transform>(e)) {
+            physics_.removeBody(it->second);
+            it = bodyIds_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    // Create/update the rest. Entities with a Velocity move themselves
+    // (Dynamic); others are obstacles (Static) unless marked kinematic.
+    reg_.view<Transform, Collider>([this](Entity e, Transform& t, Collider& c) {
+        BodyType type = c.kinematic ? BodyType::Kinematic
+                      : (reg_.has<Velocity>(e) ? BodyType::Dynamic : BodyType::Static);
+        Vec2 size{c.halfExtents.x * 2, c.halfExtents.y * 2};
+        bool sensor = c.sensor || !c.solid;
+        auto it = bodyIds_.find(e);
+        if (it == bodyIds_.end()) {
+            Body b;
+            b.type = type;
+            b.pos = t.pos;
+            b.size = size;
+            b.sensor = sensor;
+            b.friction = c.friction;
+            b.gravityScale = c.gravityScale;
+            b.userData = (void*)(uintptr_t)e; // recover the entity in contact callbacks
+            bodyIds_[e] = physics_.addBody(b);
+            return;
+        }
+        Body* b = physics_.get(it->second);
+        if (!b) return;
+        b->type = type;
+        b->pos = t.pos;
+        b->size = size;
+        b->sensor = sensor;
+        b->friction = c.friction;
+        b->gravityScale = c.gravityScale;
+        if (Velocity* v = reg_.tryGet<Velocity>(e)) b->vel = v->v;
+    });
+}
+
+void Scene::writebackPhysics() {
+    for (auto& [e, id] : bodyIds_) {
+        const Body* b = physics_.get(id);
+        if (!b || b->type == BodyType::Static) continue; // statics never move
+        Transform* t = reg_.tryGet<Transform>(e);
+        if (!t) continue;
+        t->pos = b->pos;
+        if (Velocity* v = reg_.tryGet<Velocity>(e)) v->v = b->vel;
+    }
+}
 
 void Scene::update(float dt) {
     // Snapshot script owners first: user scripts may spawn/destroy entities,
@@ -31,16 +99,21 @@ void Scene::update(float dt) {
         }
         if (s->onUpdate) s->onUpdate(e, reg_, dt);
     }
-    // velocity integration
-    reg_.view<Transform, Velocity>([dt](Entity, Transform& t, Velocity& v) {
+    syncPhysics();
+    // velocity integration for entities NOT driven by physics
+    Registry& reg = reg_;
+    reg.view<Transform, Velocity>([&reg, dt](Entity e, Transform& t, Velocity& v) {
+        if (reg.has<Collider>(e)) return; // Scene::physics() owns these
         v.v += v.accel * dt;
-        if (v.damping > 0) v.v *= (1.0f - clamp01(v.damping * dt));
+        if (v.damping > 0) v.v *= std::exp(-v.damping * dt); // exact decay, never negative
         if (v.maxSpeed > 0) {
             float l = v.v.length();
             if (l > v.maxSpeed) v.v *= (v.maxSpeed / l);
         }
         t.pos += v.v * dt;
     });
+    physics_.step(dt);
+    writebackPhysics();
 }
 
 void Scene::draw(SpriteBatch& batch, const Camera2D* cam) {

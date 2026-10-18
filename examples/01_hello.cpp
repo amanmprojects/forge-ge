@@ -1,5 +1,6 @@
 // 01_hello — minimal Forge program: window, camera, shapes, text, input.
 #include <forge/forge.hpp>
+#include <cstdlib>
 
 int main() {
     forge::EngineConfig cfg;
@@ -27,6 +28,7 @@ int main() {
 
     forge::Vec2 player{0, 0};
     float t = 0;
+    int frames = 0;
 
     engine.runVariable([&](float dt) {
         t += dt;
@@ -89,6 +91,10 @@ int main() {
                       forge::Color::fromHex(0x90BE6DFF));
         }
         batch.end();
+        if (++frames >= 600) { // auto-exit for CI; remove for play
+            if (std::getenv("CI")) engine.quit();
+            frames = 0;
+        }
     });
     return 0;
 }

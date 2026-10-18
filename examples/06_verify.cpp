@@ -28,6 +28,11 @@ int main() {
         if (!ok) ++fails;
     };
 
+    // Un-ended batch must flush into the framebuffer it was drawn for, not the
+    // one bound at the next begin() (quads used to leak onto the screen).
+    forge::Framebuffer fbo;
+    if (!fbo.create(400, 300)) { std::printf("FBO create failed\n"); return 1; }
+
     engine.runVariable([&](float dt) {
         (void)dt;
         forge::IVec2 vp = engine.viewport();
@@ -51,6 +56,27 @@ int main() {
         expect("corner-black", readPixel(5, 5), forge::Color::black());
         expect("calls==1", forge::Color{(float)engine.drawCalls(), 0, 0},
                forge::Color{1, 0, 0}); // 1 draw call
+
+        // --- render-target tracking: begin() without end() ---
+        fbo.bind();
+        forge::gl::glViewport(0, 0, fbo.width(), fbo.height());
+        forge::gl::glClearColor(0, 0, 0, 1);
+        forge::gl::glClear(GL_COLOR_BUFFER_BIT);
+        batch.begin(engine.defaultProj());
+        batch.drawRect({-100, -100, 200, 200}, forge::Color::red()); // leaked quad
+        // no end() on purpose: unbind and start a new batch for the screen
+        forge::Framebuffer::unbind(vp.x, vp.y);
+        forge::gl::glClearColor(0, 0, 0, 1);
+        forge::gl::glClear(GL_COLOR_BUFFER_BIT);
+        batch.begin(engine.defaultProj());
+        batch.drawRect({-100, -100, 200, 200}, forge::Color::green());
+        batch.end();
+
+        expect("screen-green", readPixel(px, py), forge::Color::green());
+        fbo.bind(); // FBO read buffer defaults to GL_COLOR_ATTACHMENT0
+        int fpx = fbo.width() / 2, fpy = fbo.height() / 2;
+        expect("fbo-red", readPixel(fpx, fpy), forge::Color::red());
+        forge::Framebuffer::unbind(vp.x, vp.y);
         engine.quit();
     });
 

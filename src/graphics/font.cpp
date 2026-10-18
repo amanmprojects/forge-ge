@@ -128,7 +128,7 @@ bool Font::bake(const uint8_t* ttf, float px) {
 
 void Font::destroy() {
     atlas_.destroy();
-    std::memset(glyphs_, 0, sizeof(glyphs_));
+    for (auto& g : glyphs_) g = GlyphInfo{}; // trivial; -Wclass-memaccess-safe
     delete[] ttfCopy_;
     ttfCopy_ = nullptr; ttfLen_ = 0;
 }

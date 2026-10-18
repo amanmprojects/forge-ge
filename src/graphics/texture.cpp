@@ -103,12 +103,15 @@ void Texture2D::bind(int slot) const {
 }
 
 Texture2D& Texture2D::white() {
-    static Texture2D w;
-    if (!w.valid() && gl::isLoaded()) {
+    // Deliberately leaked heap singleton: a function-local static would run
+    // its destructor at exit — after SDL_Quit/GL teardown — and delete a GL
+    // texture with no current context. One Texture2D's worth is the price.
+    static Texture2D* w = new Texture2D();
+    if (!w->valid() && gl::isLoaded()) {
         uint8_t px[4] = {255, 255, 255, 255};
-        w.upload(px, 1, 1, 4, TextureFilter::Nearest, TextureWrap::Clamp);
+        w->upload(px, 1, 1, 4, TextureFilter::Nearest, TextureWrap::Clamp);
     }
-    return w;
+    return *w;
 }
 
 } // namespace forge

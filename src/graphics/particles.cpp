@@ -51,10 +51,9 @@ void ParticleSystem::update(float dt) {
             continue;
         }
         p.vel += p.accel * dt;
-        if (p.damping > 0) {
-            float k = 1.0f - clamp01(p.damping * dt);
-            p.vel *= k;
-        }
+        // Exponential decay: the linear (1 - damping*dt) form goes negative
+        // (and flips velocity) when damping*dt > 1 on a long frame.
+        if (p.damping > 0) p.vel *= std::exp(-p.damping * dt);
         p.pos += p.vel * dt;
         p.rotation += p.rotVel * dt;
         ++i;

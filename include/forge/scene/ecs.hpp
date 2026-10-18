@@ -2,6 +2,7 @@
 // ECS: sparse-set storage, cache-friendly iteration, no dependencies.
 // Entity = generational id (safe stale handles). Components are plain structs.
 
+#include "forge/core/logger.hpp"
 #include <cstdint>
 #include <vector>
 #include <unordered_map>
@@ -13,6 +14,8 @@ namespace forge {
 
 using Entity = uint32_t;
 inline constexpr Entity kNullEntity = 0; // never issued: indices start at 1
+inline constexpr uint32_t kMaxEntityIndex = 0x000FFFFFu; // 20-bit index field
+inline constexpr uint32_t kMaxEntityGen = 0xFFFu;        // 12-bit generation field
 
 inline uint32_t entityIndex(Entity e) { return e & 0x000FFFFFu; }       // 20-bit index
 inline uint32_t entityGen(Entity e) { return (e >> 20) & 0xFFFu; }      // 12-bit generation
@@ -108,6 +111,15 @@ public:
         else {
             idx = nextIdx_;
             if (idx == 0) idx = nextIdx_ = 1; // index 0 reserved: kNullEntity
+            // The index field is 20 bits. Going past it would silently alias
+            // an existing entity (makeEntity masks the index), so refuse --
+            // loudly, but without crashing a shipping game (log + null).
+            if (idx > kMaxEntityIndex) {
+                FORGE_LOG_ERROR("Registry::create: entity index space exhausted "
+                                "(> %u live+recycled slots); returning kNullEntity",
+                                (unsigned)kMaxEntityIndex);
+                return kNullEntity;
+            }
             if (idx >= alive_.size()) alive_.resize(idx + 1, 0);
             nextIdx_ = idx + 1;
         }
@@ -121,7 +133,7 @@ public:
         // clearFor is gen-checked (no-op for stale handles), so clearing first
         // also reaps orphans; the gen check below guards double-destroy recycle.
         if (i >= alive_.size() || alive_[i] != entityGen(e)) return; // stale
-        alive_[i] = (alive_[i] + 1) & 0xFFFu;
+        alive_[i] = (uint16_t)((alive_[i] + 1) & kMaxEntityGen);
         free_.push_back(i);
     }
 
@@ -204,7 +216,10 @@ private:
     }
 
     mutable std::unordered_map<std::type_index, std::unique_ptr<IPool>> pools_;
-    std::vector<uint8_t> alive_; // generation per index
+    // Per-index generation. MUST hold the full 12-bit range: a uint8_t here
+    // aliases stale handles after 256 recycles (gen & 0xFFF never wraps in
+    // the handle, so a truncated store can match a dead entity).
+    std::vector<uint16_t> alive_;
     std::vector<uint32_t> free_;
     uint32_t nextIdx_ = 0;
 };

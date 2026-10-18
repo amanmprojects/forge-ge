@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <vector>
 #include <fstream>
+#include <filesystem>
 #include "forge/math/math.hpp"
 #include "forge/scene/ecs.hpp"
 #include "forge/scene/components.hpp"
@@ -128,6 +129,39 @@ static void testEcs() {
     std::printf("ecs ok\n");
 }
 
+static void testEcsLimits() {
+    // Stale handles must stay dead across generation wraps. alive_ holds the
+    // full 12-bit gen; with a uint8_t store the slot wrapped back to the
+    // original handle's gen after 256 recycles (stale handle "alive").
+    {
+        Registry r;
+        Entity first = r.create();
+        uint32_t idx = entityIndex(first);
+        r.destroy(first);
+        for (int i = 0; i < 255; ++i) { // 256 generation bumps total
+            Entity e = r.create();
+            CHECK(entityIndex(e) == idx);
+            r.destroy(e);
+        }
+        CHECK(!r.alive(first)); // must not resurrect at the wrap point
+        CHECK(!r.has<Transform>(first));
+        Entity fresh = r.create();
+        CHECK(r.alive(fresh) && entityIndex(fresh) == idx);
+    }
+    // Index space exhaustion: past 2^20 the masked index would alias slot 1.
+    // create() must refuse with kNullEntity instead of issuing a duplicate.
+    {
+        Registry r;
+        Entity last = kNullEntity;
+        for (uint32_t i = 0; i < kMaxEntityIndex; ++i) last = r.create(); // indices 1..2^20-1
+        CHECK(last != kNullEntity);
+        CHECK(entityIndex(last) == kMaxEntityIndex);
+        CHECK(r.create() == kNullEntity);
+        CHECK(!r.alive(kNullEntity));
+    }
+    std::printf("ecs-limits ok\n");
+}
+
 static void testPhysics() {
     PhysicsWorld world;
     world.setGravity({0, -1000});
@@ -230,6 +264,171 @@ static void testPhysicsExtra() {
     std::printf("physics-extra ok\n");
 }
 
+static void testPhysicsSolver() {
+    // Determinism: identical worlds stepped identically must match exactly
+    // (the header promises a deterministic step).
+    {
+        auto build = [] {
+            PhysicsWorld w;
+            w.setGravity({0, -980});
+            Body g;
+            g.type = BodyType::Static; g.pos = {0, -50}; g.size = {800, 100};
+            w.addBody(g);
+            for (int i = 0; i < 8; ++i) {
+                Body b;
+                b.type = BodyType::Dynamic;
+                b.pos = {(float)i * 24.0f - 84.0f, 120.0f + i * 40.0f};
+                b.size = {20, 20};
+                b.friction = 0.2f;
+                b.restitution = 0.3f;
+                w.addBody(b);
+            }
+            return w;
+        };
+        PhysicsWorld a = build(), b = build();
+        for (int i = 0; i < 240; ++i) { a.step(1.0f / 60.0f); b.step(1.0f / 60.0f); }
+        CHECK(a.bodyCount() == b.bodyCount());
+        for (uint32_t id = 1; id <= a.bodyCount(); ++id) {
+            const Body* pa = a.get(id);
+            const Body* pb = b.get(id);
+            CHECK(pa && pb);
+            CHECK(pa->pos.x == pb->pos.x && pa->pos.y == pb->pos.y);
+            CHECK(pa->vel.x == pb->vel.x && pa->vel.y == pb->vel.y);
+        }
+    }
+    // Restitution: a bouncy ball must come back up off the floor.
+    {
+        PhysicsWorld w;
+        w.setGravity({0, -1000});
+        Body g;
+        g.type = BodyType::Static; g.pos = {0, -50}; g.size = {1000, 100};
+        w.addBody(g);
+        Body b;
+        b.type = BodyType::Dynamic; b.pos = {0, 150}; b.size = {20, 20};
+        b.restitution = 0.8f;
+        uint32_t id = w.addBody(b);
+        bool bounced = false;
+        float topAfter = 0;
+        for (int i = 0; i < 180; ++i) {
+            w.step(1.0f / 60.0f);
+            const Body* pb = w.get(id);
+            if (pb->vel.y > 100.0f) bounced = true; // moving up: it bounced
+            if (bounced) topAfter = std::max(topAfter, pb->pos.y);
+        }
+        CHECK(bounced);
+        CHECK(topAfter > 60.0f); // rebounded to a visible height
+    }
+    // Friction: a sliding box on a grippy floor slows down.
+    {
+        PhysicsWorld w;
+        w.setGravity({0, -1000});
+        Body g;
+        g.type = BodyType::Static; g.pos = {0, -10}; g.size = {1000, 20};
+        w.addBody(g);
+        Body b;
+        b.type = BodyType::Dynamic; b.pos = {-300, 10}; b.size = {20, 20};
+        b.vel = {300, 0}; b.friction = 0.5f;
+        uint32_t id = w.addBody(b);
+        for (int i = 0; i < 120; ++i) w.step(1.0f / 60.0f);
+        const Body* pb = w.get(id);
+        CHECK(pb->onGround);
+        CHECK(std::fabs(pb->vel.x) < 150.0f); // started at 300
+    }
+    // Stack: boxes resting on each other must not sink through.
+    {
+        PhysicsWorld w;
+        w.setGravity({0, -1000});
+        Body g;
+        g.type = BodyType::Static; g.pos = {0, -25}; g.size = {400, 50};
+        w.addBody(g);
+        uint32_t ids[3];
+        for (int i = 0; i < 3; ++i) {
+            Body b;
+            b.type = BodyType::Dynamic;
+            b.pos = {0, 10.0f + i * 20.0f}; b.size = {20, 20};
+            ids[i] = w.addBody(b);
+        }
+        for (int i = 0; i < 300; ++i) w.step(1.0f / 60.0f);
+        CHECK(w.get(ids[0])->pos.y > 1.0f);  // floor top is y = 0
+        CHECK(w.get(ids[1])->pos.y > 20.0f);
+        CHECK(w.get(ids[2])->pos.y > 40.0f);
+    }
+    // raycast from INSIDE a body skips that body (no distance-0 hits).
+    {
+        PhysicsWorld w;
+        w.setGravity({0, 0});
+        Body big;
+        big.type = BodyType::Static; big.pos = {0, 0}; big.size = {200, 200};
+        w.addBody(big);
+        Body small;
+        small.type = BodyType::Static; small.pos = {300, 0}; small.size = {40, 40};
+        uint32_t smallId = w.addBody(small);
+        uint32_t hit = 0;
+        Vec2 hp{};
+        CHECK(w.raycast({0, 0}, {400, 0}, &hit, &hp));
+        CHECK(hit == smallId); // the enclosing body must not win at t = 0
+        CHECK_CLOSE(hp.x, 280.0f, 0.5f);
+        PhysicsWorld w2; // only the enclosing body: nothing to hit
+        Body only;
+        only.type = BodyType::Static; only.pos = {0, 0}; only.size = {100, 100};
+        w2.addBody(only);
+        CHECK(!w2.raycast({0, 0}, {1000, 0}));
+    }
+    // queryRect uses the cached grid; must track moves, and get()/removeBody
+    // index bookkeeping (swap-erase) must stay consistent.
+    {
+        PhysicsWorld w;
+        w.setGravity({0, 0});
+        Body a;
+        a.type = BodyType::Dynamic; a.pos = {0, 0}; a.size = {10, 10};
+        Body b;
+        b.type = BodyType::Dynamic; b.pos = {10000, 0}; b.size = {10, 10};
+        uint32_t ia = w.addBody(a), ib = w.addBody(b);
+        auto q1 = w.queryRect({-50, -50, 100, 100});
+        CHECK(q1.size() == 1 && q1[0] == ia);
+        w.get(ib)->pos = {20, 0}; // direct write: query must see it
+        auto q2 = w.queryRect({-50, -50, 100, 100});
+        CHECK(q2.size() == 2);
+        w.removeBody(ia);
+        CHECK(w.get(ia) == nullptr);
+        CHECK(w.get(ib) != nullptr && w.get(ib)->pos.x == 20.0f);
+        auto q3 = w.queryRect({-50, -50, 100, 100});
+        CHECK(q3.size() == 1 && q3[0] == ib);
+    }
+    std::printf("physics-solver ok\n");
+}
+
+static void testScenePhysics() {
+    // Collider is wired: a dynamic crate must land on a static floor.
+    Scene scene;
+    scene.physics().setGravity({0, -500});
+    Entity floor = scene.create("floor");
+    scene.registry().get<Transform>(floor).pos = {0, -50};
+    scene.registry().emplace<Collider>(floor, Collider{{200, 50}});
+    Entity crate = scene.create("crate");
+    scene.registry().get<Transform>(crate).pos = {0, 120};
+    Collider cc;
+    cc.halfExtents = {10, 10};
+    cc.friction = 0.5f;
+    scene.registry().emplace<Collider>(crate, cc);
+    scene.registry().emplace<Velocity>(crate);
+    scene.update(1.0f / 60.0f); // first sync creates the bodies
+    CHECK(scene.physics().bodyCount() == 2);
+    for (int i = 0; i < 300; ++i) scene.update(1.0f / 60.0f);
+    float y = scene.registry().get<Transform>(crate).pos.y;
+    CHECK_CLOSE(y, 10.0f, 2.0f); // floor top = 0, crate half = 10
+    CHECK(scene.registry().get<Velocity>(crate).v.y > -50.0f); // settled-ish
+    // Destroying the entity retracts its body.
+    scene.destroy(crate);
+    CHECK(scene.physics().bodyCount() == 1);
+    scene.update(1.0f / 60.0f);
+    CHECK(scene.physics().bodyCount() == 1);
+    // clear() wipes both sides.
+    scene.clear();
+    CHECK(scene.physics().bodyCount() == 0);
+    std::printf("scene-physics ok\n");
+}
+
 static void testCamera() {
     Camera2D cam;
     cam.position = {100, -50};
@@ -290,6 +489,55 @@ static void testInput() {
     std::printf("input ok\n");
 }
 
+static void testInputSurface() {
+    Input in;
+    in.connectGamepad(0);
+    // Every enum value must round-trip (kPadBtns was 14: DpadRight was
+    // silently rejected by setGamepadButton and always read false).
+    for (int i = 0; i < (int)GamepadButton::Count; ++i) {
+        GamepadButton b = (GamepadButton)i;
+        in.beginFrame();
+        in.setGamepadButton(0, b, true);
+        CHECK(in.padDown(0, b));
+        CHECK(in.padPressed(0, b));
+        CHECK(in.anyPadDown(b));
+        in.setGamepadButton(0, b, false);
+        CHECK(!in.padDown(0, b));
+        CHECK(in.padReleased(0, b));
+    }
+    // Sub-frame taps: down AND up between two beginFrame() calls must be
+    // visible to both pressed() and released() (old code missed them).
+    in.beginFrame();
+    in.setKey(Key::J, true);
+    in.setKey(Key::J, false);
+    CHECK(in.pressed(Key::J) && in.released(Key::J) && !in.isDown(Key::J));
+    in.beginFrame();
+    CHECK(!in.pressed(Key::J) && !in.released(Key::J));
+    // ...including through action mapping.
+    in.bindKey("tap", Key::K);
+    in.beginFrame();
+    in.setKey(Key::K, true);
+    in.setKey(Key::K, false);
+    CHECK(in.actionPressed("tap") && in.actionReleased("tap"));
+    // Mouse tap in one frame.
+    in.beginFrame();
+    in.setMouseButton(MouseButton::Left, true);
+    in.setMouseButton(MouseButton::Left, false);
+    CHECK(in.mousePressed(MouseButton::Left) && in.mouseReleased(MouseButton::Left));
+    // A release with no preceding press must not report a press.
+    in.beginFrame();
+    in.setGamepadButton(0, GamepadButton::A, false);
+    CHECK(!in.padPressed(0, GamepadButton::A));
+    // Repeated down events with no release are a single press.
+    in.beginFrame();
+    in.setKey(Key::M, true);
+    in.setKey(Key::M, true);
+    CHECK(in.pressed(Key::M));
+    in.beginFrame();
+    CHECK(in.isDown(Key::M) && !in.pressed(Key::M)); // held, not re-pressed
+    std::printf("input-surface ok\n");
+}
+
 static void testTilemap() {
     Tilemap map;
     map.create(4, 4, 16, 16);
@@ -309,6 +557,24 @@ static void testTilemap() {
     CHECK(m2.tile(0, 0, 0) == 1);
     CHECK(m2.tile(0, 1, 1) == 2);
     CHECK(m2.tile(0, 3, 3) == 3);
+
+    // Layer visibility is a render concern: an invisible layer's solids must
+    // still be returned (hiding a collision layer must not remove collision).
+    {
+        std::filesystem::path p =
+            std::filesystem::temp_directory_path() / "forge_test_invisible.json";
+        { std::ofstream f(p); f << R"JSON({
+            "width": 2, "height": 1, "tilewidth": 16, "tileheight": 16,
+            "tilesets": [{"firstgid": 1, "image": "ts.png", "columns": 2, "tilecount": 2}],
+            "layers": [{"type": "tilelayer", "name": "solid", "width": 2, "height": 1,
+                        "visible": false, "data": [1, 0]}]
+        })JSON"; }
+        Tilemap mi;
+        CHECK(mi.loadTiledJson(p.string()));
+        mi.setSolid(1, true);
+        CHECK(mi.solidsInRect({0, 0, 16, 16}).size() == 1);
+        std::filesystem::remove(p);
+    }
     std::printf("tilemap ok\n");
 }
 
@@ -322,10 +588,10 @@ static void testTilemapJson() {
                     "visible": true, "opacity": 1.0,
                     "data": [0, 6, 0, 7, 0, 2147483657]}]
     })JSON";
-    const char* tmp = "/tmp/opencode/forge_test_map.json";
+    std::filesystem::path tmp = std::filesystem::temp_directory_path() / "forge_test_map.json";
     { std::ofstream f(tmp); f << json; }
     Tilemap m;
-    CHECK(m.loadTiledJson(tmp));
+    CHECK(m.loadTiledJson(tmp.string()));
     CHECK(m.width() == 3 && m.height() == 2);
     CHECK(m.tilesetPath() == "ts.png");
     // Tiled row 0 (top): [0,6,0] -> Forge y=1; row 1: [7,0,flip|9] -> y=0.
@@ -335,11 +601,29 @@ static void testTilemapJson() {
     CHECK(m.tile(0, 2, 0) == 5); // 0x80000009 masked to gid 9
     CHECK(m.tile(0, 0, 1) == 0);
     // Missing keys must fail cleanly, not segfault (old code deref'd null).
-    const char* bad = "/tmp/opencode/forge_test_bad.json";
+    std::filesystem::path bad = std::filesystem::temp_directory_path() / "forge_test_bad.json";
     { std::ofstream f(bad); f << "{\"layers\": []}"; }
     Tilemap m2;
-    CHECK(!m2.loadTiledJson(bad));
-    CHECK(!m2.loadTiledJson("/tmp/opencode/does_not_exist.json"));
+    CHECK(!m2.loadTiledJson(bad.string()));
+    CHECK(!m2.loadTiledJson((std::filesystem::temp_directory_path() / "forge_nope.json").string()));
+    // Tileset tile size different from the map tile size would break tileUv():
+    // must be rejected at load instead of rendering garbage.
+    {
+        std::filesystem::path mismatch =
+            std::filesystem::temp_directory_path() / "forge_test_mismatch.json";
+        { std::ofstream f(mismatch); f << R"JSON({
+            "width": 2, "height": 1, "tilewidth": 16, "tileheight": 16,
+            "tilesets": [{"firstgid": 1, "image": "ts.png",
+                          "tilewidth": 32, "tileheight": 32, "columns": 2, "tilecount": 2}],
+            "layers": [{"type": "tilelayer", "name": "g", "width": 2, "height": 1,
+                        "data": [1, 0]}]
+        })JSON"; }
+        Tilemap m3;
+        CHECK(!m3.loadTiledJson(mismatch.string()));
+        std::filesystem::remove(mismatch);
+    }
+    std::filesystem::remove(tmp);
+    std::filesystem::remove(bad);
     std::printf("tilemap-json ok\n");
 }
 
@@ -400,6 +684,20 @@ static void testAnim() {
         pp.add(tp);
         pp.update(1.0f); // end of first leg -> swaps to 10->0
         pp.update(0.5f); // halfway back
+        CHECK_CLOSE(seen, 5.0f, 1e-4f);
+    }
+    {
+        // A long frame must carry its overflow across legs (old code swapped
+        // once and clamped the remainder: 2.5 legs would report the value at
+        // the end of leg 2 instead of 0.5 into leg 3).
+        Tweens pp;
+        float seen = -1;
+        Tween tl;
+        tl.from = 0; tl.to = 10; tl.duration = 1.0f;
+        tl.mode = TweenMode::PingPong; tl.ease = easing::linear;
+        tl.onUpdate = [&](float v) { seen = v; };
+        pp.add(tl);
+        pp.update(2.5f); // 0.5 into the third leg (0 -> 10)
         CHECK_CLOSE(seen, 5.0f, 1e-4f);
     }
     // Per-clip frame events (old map was global across clips)
@@ -487,8 +785,9 @@ static void testScene() {
     CHECK(scene.findByTag("hero") == e);
     CHECK(scene.findByTag("missing") == kNullEntity);
     // Script that destroys its own entity mid-update must not corrupt update
-    scene.registry().emplace<Script>(e, Script{
-        [](Entity self, Registry& reg, float) { reg.destroy(self); }});
+    Script suicide;
+    suicide.onUpdate = [](Entity self, Registry& reg, float) { reg.destroy(self); };
+    scene.registry().emplace<Script>(e, std::move(suicide));
     scene.update(0.016f); // would UAF inside view before fix
     CHECK(!scene.registry().alive(e));
     scene.update(0.016f); // no scripts left, still safe
@@ -496,13 +795,18 @@ static void testScene() {
 }
 
 int main() {
+    std::printf("forge %s (tests)\n", FORGE_VERSION);
     testMath();
     testMathExtra();
     testEcs();
+    testEcsLimits();
     testPhysics();
     testPhysicsExtra();
+    testPhysicsSolver();
+    testScenePhysics();
     testCamera();
     testInput();
+    testInputSurface();
     testTilemap();
     testTilemapJson();
     testAnim();

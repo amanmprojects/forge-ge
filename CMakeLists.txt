@@ -12,6 +12,21 @@ option(FORGE_BUILD_EXAMPLES "Build examples" ON)
 option(FORGE_BUILD_TESTS "Build tests" ON)
 option(FORGE_ENABLE_PROFILING "Enable internal profiler" ON)
 
+# Sanitizers: single-config Debug builds get ASan+UBSan by default (previous
+# behavior); set FORGE_ENABLE_SANITIZERS explicitly with multi-config
+# generators (CMAKE_BUILD_TYPE is ignored there).
+if(NOT DEFINED FORGE_ENABLE_SANITIZERS)
+    if(CMAKE_BUILD_TYPE STREQUAL "Debug" AND NOT CMAKE_CONFIGURATION_TYPES)
+        set(FORGE_ENABLE_SANITIZERS ON)
+    else()
+        set(FORGE_ENABLE_SANITIZERS OFF)
+    endif()
+endif()
+option(FORGE_ENABLE_SANITIZERS "Compile and link with ASan+UBSan" ${FORGE_ENABLE_SANITIZERS})
+
+# Shared warning set: the library, examples and tests are all held to it.
+set(FORGE_WARNING_FLAGS -Wall -Wextra -Wpedantic)
+
 # Dependencies: SDL3 + OpenGL (system). Everything else is vendored.
 # Prefer a CMake SDL3 package, fall back to pkg-config.
 find_package(SDL3 QUIET)
@@ -69,16 +84,22 @@ target_link_libraries(forge PUBLIC
     dl
 )
 
+# The version macros live in forge.hpp with fallback defaults; CMake (the
+# real project() version) overrides them via compile definitions.
 target_compile_definitions(forge PUBLIC
     FORGE_PROFILING=$<IF:$<BOOL:${FORGE_ENABLE_PROFILING}>,1,0>
+    FORGE_VERSION_MAJOR=${PROJECT_VERSION_MAJOR}
+    FORGE_VERSION_MINOR=${PROJECT_VERSION_MINOR}
+    FORGE_VERSION_PATCH=${PROJECT_VERSION_PATCH}
+    FORGE_VERSION="${PROJECT_VERSION}"
 )
 
-target_compile_options(forge PRIVATE -Wall -Wextra -Wpedantic)
+target_compile_options(forge PRIVATE ${FORGE_WARNING_FLAGS})
 target_compile_options(forge PRIVATE $<$<CONFIG:Release>:-O3>)
 
-# Sanitizers in Debug (compile AND link, symmetric — the old setup linked
-# PUBLIC but compiled PRIVATE, breaking downstream ASan builds).
-if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+# Sanitizers (compile AND link, symmetric — the old setup linked PUBLIC but
+# compiled PRIVATE, breaking downstream ASan builds).
+if(FORGE_ENABLE_SANITIZERS)
     target_compile_options(forge PUBLIC -g -O1 -fsanitize=address,undefined -fno-omit-frame-pointer)
     target_link_options(forge PUBLIC -fsanitize=address,undefined)
 endif()
@@ -97,7 +118,7 @@ if(FORGE_BUILD_EXAMPLES)
         get_filename_component(name "${src}" NAME_WE)
         add_executable("${name}" "${src}")
         target_link_libraries("${name}" PRIVATE forge)
-        target_compile_options("${name}" PRIVATE -Wall -Wextra)
+        target_compile_options("${name}" PRIVATE ${FORGE_WARNING_FLAGS})
     endforeach()
 endif()
 
@@ -106,6 +127,6 @@ if(FORGE_BUILD_TESTS)
     enable_testing()
     add_executable(test_engine tests/test_engine.cpp)
     target_link_libraries(test_engine PRIVATE forge)
-    target_compile_options(test_engine PRIVATE -Wall -Wextra)
+    target_compile_options(test_engine PRIVATE ${FORGE_WARNING_FLAGS})
     add_test(NAME test_engine COMMAND test_engine)
 endif()

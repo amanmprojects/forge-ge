@@ -17,10 +17,20 @@
 //       });
 //   }
 
+// Version comes from CMake (project(forge VERSION ...)); the defaults below
+// keep the header usable in non-CMake builds.
+#ifndef FORGE_VERSION_MAJOR
 #define FORGE_VERSION_MAJOR 0
+#endif
+#ifndef FORGE_VERSION_MINOR
 #define FORGE_VERSION_MINOR 1
+#endif
+#ifndef FORGE_VERSION_PATCH
 #define FORGE_VERSION_PATCH 0
+#endif
+#ifndef FORGE_VERSION
 #define FORGE_VERSION "0.1.0"
+#endif
 
 #include "forge/math/math.hpp"
 #include "forge/core/logger.hpp"

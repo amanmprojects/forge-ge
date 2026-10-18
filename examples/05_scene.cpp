@@ -1,6 +1,8 @@
-// 05_scene — ECS scene + tweens + script components.
+// 05_scene — ECS scene + tweens + script components + Collider physics.
 #include <forge/forge.hpp>
 #include <cstdio>
+#include <cstdlib>
+#include <vector>
 
 int main() {
     forge::EngineConfig cfg;
@@ -30,14 +32,36 @@ int main() {
         v.v = {-t.pos.y, t.pos.x};
         v.v = v.v.normalized() * 60.0f;
         float speed = 40.0f + (i % 5) * 20.0f;
-        scene.registry().emplace<forge::Script>(
-            e, forge::Script{[speed](forge::Entity ent, forge::Registry& reg, float dt) {
-                auto& tr = reg.get<forge::Transform>(ent);
-                float ang = std::atan2(tr.pos.y, tr.pos.x) + speed * 0.002f * dt;
-                float r = tr.pos.length();
-                tr.pos = {std::cos(ang) * r, std::sin(ang) * r};
-                tr.rotation += dt;
-            }});
+        forge::Script orbit;
+        orbit.onUpdate = [speed](forge::Entity ent, forge::Registry& reg, float dt) {
+            auto& tr = reg.get<forge::Transform>(ent);
+            float ang = std::atan2(tr.pos.y, tr.pos.x) + speed * 0.002f * dt;
+            float r = tr.pos.length();
+            tr.pos = {std::cos(ang) * r, std::sin(ang) * r};
+            tr.rotation += dt;
+        };
+        scene.registry().emplace<forge::Script>(e, std::move(orbit));
+    }
+
+    // Collider demo: Scene syncs Transform+Collider entities into its
+    // PhysicsWorld (Velocity present -> dynamic; here a crate lands on a
+    // static floor).
+    forge::Entity floor = scene.create("floor");
+    scene.registry().get<forge::Transform>(floor).pos = {0, -260};
+    scene.registry().emplace<forge::Collider>(floor, forge::Collider{{380, 20}});
+    auto& fs = scene.registry().emplace<forge::Sprite>(floor);
+    fs.texture = &orb; fs.size = {760, 40}; fs.color = {0.35f, 0.35f, 0.45f, 1.0f};
+
+    for (int i = 0; i < 5; ++i) {
+        forge::Entity c = scene.create("crate");
+        scene.registry().get<forge::Transform>(c).pos = {-160.0f + i * 80.0f, 200.0f + i * 40.0f};
+        forge::Collider col;
+        col.halfExtents = {12, 12};
+        col.friction = 0.4f;
+        scene.registry().emplace<forge::Collider>(c, col);
+        scene.registry().emplace<forge::Velocity>(c);
+        auto& s = scene.registry().emplace<forge::Sprite>(c);
+        s.texture = &orb; s.size = {24, 24}; s.color = {0.9f, 0.6f, 0.2f, 1.0f};
     }
 
     // scale-punch tween on demand

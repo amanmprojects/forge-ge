@@ -79,6 +79,10 @@ private:
     int quadCount_ = 0;
     const Texture2D* slots_[MAX_SLOTS] = {};
     int slotCount_ = 0;
+    // Draw framebuffer + viewport recorded at begin(); an un-ended batch
+    // flushes into this target, not whatever happens to be bound later.
+    uint32_t boundFbo_ = 0;
+    int boundVp_[4] = {0, 0, 0, 0};
 
     int drawCalls_ = 0;
     int quadsDrawn_ = 0;

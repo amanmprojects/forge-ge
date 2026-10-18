@@ -40,7 +40,11 @@ public:
     ~Input();
 
     // --- frame lifecycle (called by Engine) ---
-    void beginFrame();   // copies current -> previous
+    // Copies current -> previous and clears the press/release latches.
+    // pressed()/released() also report taps that both went down AND up
+    // between two beginFrame() calls (a key tapped inside one frame would
+    // otherwise be invisible to both queries).
+    void beginFrame();
     void endFrame() {}   // reserved
     void handleWindowEvent(); // pumps mouse position etc. if needed
 
@@ -96,7 +100,7 @@ private:
     static constexpr int kKeys = (int)Key::Count;
     static constexpr int kMouse = 5;
     static constexpr int kPads = 4;
-    static constexpr int kPadBtns = 14;
+    static constexpr int kPadBtns = (int)GamepadButton::Count;
     static constexpr int kAxes = 6;
 
     bool keys_[kKeys] = {};
@@ -107,6 +111,12 @@ private:
     bool prevPadBtns_[kPads][kPadBtns] = {};
     float axes_[kPads][kAxes] = {};
     bool padConnected_[kPads] = {};
+
+    // Set on a real down/up transition; cleared by beginFrame(). See the
+    // beginFrame comment: keeps sub-frame taps visible to pressed()/released().
+    bool keyPressLatch_[kKeys] = {}, keyReleaseLatch_[kKeys] = {};
+    bool mousePressLatch_[kMouse] = {}, mouseReleaseLatch_[kMouse] = {};
+    bool padPressLatch_[kPads][kPadBtns] = {}, padReleaseLatch_[kPads][kPadBtns] = {};
 
     Vec2 mousePos_{}, prevMousePos_{};
     float wheelX_ = 0, wheelY_ = 0;

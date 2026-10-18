@@ -169,6 +169,17 @@ bool Tilemap::loadTiledJson(const std::string& path) {
         const JVal& ts = sets->arr[0];
         const JVal* fg = ts.find("firstgid");
         if (fg && fg->type == JVal::Num) firstgid = (int)fg->num;
+        // tileUv() assumes tileset tiles are exactly tileW_ x tileH_ pixels;
+        // a mismatched tileset would render garbage, so reject it loudly.
+        const JVal* tsw = ts.find("tilewidth");
+        const JVal* tsh = ts.find("tileheight");
+        int setTileW = (tsw && tsw->type == JVal::Num) ? (int)tsw->num : 0;
+        int setTileH = (tsh && tsh->type == JVal::Num) ? (int)tsh->num : 0;
+        if ((setTileW > 0 && setTileW != tileW_) || (setTileH > 0 && setTileH != tileH_)) {
+            FORGE_LOG_ERROR("Tilemap '%s': tileset tile size %dx%d != map tile size %dx%d",
+                            path.c_str(), setTileW, setTileH, tileW_, tileH_);
+            return false;
+        }
         const JVal* img = ts.find("image");
         if (img && img->type == JVal::Str) {
             tilesetPath_ = img->str;
@@ -251,8 +262,10 @@ std::vector<Rect> Tilemap::solidsInRect(Rect r) const {
     // floor (not truncation): negative coords must round down
     int x0 = (int)std::floor(r.x / tileW_) - 1, x1 = (int)std::floor((r.x + r.w) / tileW_) + 1;
     int y0 = (int)std::floor(r.y / tileH_) - 1, y1 = (int)std::floor((r.y + r.h) / tileH_) + 1;
+    // Visibility is a render concern: hiding a layer must NOT silently remove
+    // its solids (toggling a "collision" layer's visibility is a drawing
+    // decision, not a physics one). Delete/skip the layer explicitly instead.
     for (auto& l : layers_) {
-        if (!l.visible) continue;
         for (int y = y0; y <= y1; ++y)
             for (int x = x0; x <= x1; ++x) {
                 if (x < 0 || y < 0 || x >= l.width || y >= l.height) continue;

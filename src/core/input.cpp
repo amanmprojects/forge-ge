@@ -13,6 +13,12 @@ void Input::beginFrame() {
     std::memcpy(prevPadBtns_, padBtns_, sizeof(padBtns_));
     prevMousePos_ = mousePos_;
     wheelX_ = 0; wheelY_ = 0;
+    std::memset(keyPressLatch_, 0, sizeof(keyPressLatch_));
+    std::memset(keyReleaseLatch_, 0, sizeof(keyReleaseLatch_));
+    std::memset(mousePressLatch_, 0, sizeof(mousePressLatch_));
+    std::memset(mouseReleaseLatch_, 0, sizeof(mouseReleaseLatch_));
+    std::memset(padPressLatch_, 0, sizeof(padPressLatch_));
+    std::memset(padReleaseLatch_, 0, sizeof(padReleaseLatch_));
     textBuf_.clear();
 }
 
@@ -20,18 +26,32 @@ void Input::handleWindowEvent() {}
 
 void Input::setKey(Key k, bool down) {
     int i = (int)k;
-    if (i > 0 && i < kKeys) keys_[i] = down;
+    if (i <= 0 || i >= kKeys) return;
+    if (down != keys_[i]) {
+        if (down) keyPressLatch_[i] = true;
+        else keyReleaseLatch_[i] = true;
+    }
+    keys_[i] = down;
 }
 
 void Input::setMouseButton(MouseButton b, bool down) {
     int i = (int)b;
-    if (i >= 0 && i < kMouse) mouse_[i] = down;
+    if (i < 0 || i >= kMouse) return;
+    if (down != mouse_[i]) {
+        if (down) mousePressLatch_[i] = true;
+        else mouseReleaseLatch_[i] = true;
+    }
+    mouse_[i] = down;
 }
 
 void Input::setGamepadButton(int pad, GamepadButton b, bool down) {
     if (pad < 0 || pad >= kPads) return;
     int i = (int)b;
     if (i < 0 || i >= kPadBtns) return;
+    if (down != padBtns_[pad][i]) {
+        if (down) padPressLatch_[pad][i] = true;
+        else padReleaseLatch_[pad][i] = true;
+    }
     padBtns_[pad][i] = down;
 }
 
@@ -50,6 +70,8 @@ void Input::disconnectGamepad(int id) {
         padConnected_[id] = false;
         std::memset(padBtns_[id], 0, sizeof(padBtns_[id]));
         std::memset(axes_[id], 0, sizeof(axes_[id]));
+        std::memset(padPressLatch_[id], 0, sizeof(padPressLatch_[id]));
+        std::memset(padReleaseLatch_[id], 0, sizeof(padReleaseLatch_[id]));
     }
 }
 
@@ -102,8 +124,16 @@ void Input::setKeyFromScancode(uint32_t scancode, bool down) {
 }
 
 bool Input::isDown(Key k) const { int i = (int)k; return i > 0 && i < kKeys && keys_[i]; }
-bool Input::pressed(Key k) const { int i = (int)k; return i > 0 && i < kKeys && keys_[i] && !prevKeys_[i]; }
-bool Input::released(Key k) const { int i = (int)k; return i > 0 && i < kKeys && !keys_[i] && prevKeys_[i]; }
+bool Input::pressed(Key k) const {
+    int i = (int)k;
+    if (i <= 0 || i >= kKeys) return false;
+    return keyPressLatch_[i] || (keys_[i] && !prevKeys_[i]);
+}
+bool Input::released(Key k) const {
+    int i = (int)k;
+    if (i <= 0 || i >= kKeys) return false;
+    return keyReleaseLatch_[i] || (!keys_[i] && prevKeys_[i]);
+}
 
 bool Input::mouseDown(MouseButton b) const {
     int i = (int)b;
@@ -111,11 +141,13 @@ bool Input::mouseDown(MouseButton b) const {
 }
 bool Input::mousePressed(MouseButton b) const {
     int i = (int)b;
-    return i >= 0 && i < kMouse && mouse_[i] && !prevMouse_[i];
+    if (i < 0 || i >= kMouse) return false;
+    return mousePressLatch_[i] || (mouse_[i] && !prevMouse_[i]);
 }
 bool Input::mouseReleased(MouseButton b) const {
     int i = (int)b;
-    return i >= 0 && i < kMouse && !mouse_[i] && prevMouse_[i];
+    if (i < 0 || i >= kMouse) return false;
+    return mouseReleaseLatch_[i] || (!mouse_[i] && prevMouse_[i]);
 }
 
 bool Input::padDown(int pad, GamepadButton b) const {
@@ -126,20 +158,22 @@ bool Input::padDown(int pad, GamepadButton b) const {
 bool Input::padPressed(int pad, GamepadButton b) const {
     int i = (int)b;
     if (pad < 0 || pad >= kPads || i < 0 || i >= kPadBtns) return false;
-    return padBtns_[pad][i] && !prevPadBtns_[pad][i];
+    return padPressLatch_[pad][i] || (padBtns_[pad][i] && !prevPadBtns_[pad][i]);
 }
 bool Input::padReleased(int pad, GamepadButton b) const {
     int i = (int)b;
     if (pad < 0 || pad >= kPads || i < 0 || i >= kPadBtns) return false;
-    return !padBtns_[pad][i] && prevPadBtns_[pad][i];
+    return padReleaseLatch_[pad][i] || (!padBtns_[pad][i] && prevPadBtns_[pad][i]);
 }
 float Input::padAxis(int pad, int axis) const {
     if (pad < 0 || pad >= kPads || axis < 0 || axis >= kAxes) return 0.0f;
     return axes_[pad][axis];
 }
 bool Input::anyPadDown(GamepadButton b) const {
+    int i = (int)b;
+    if (i < 0 || i >= kPadBtns) return false;
     for (int p = 0; p < kPads; ++p)
-        if (padConnected_[p] && padBtns_[p][(int)b]) return true;
+        if (padConnected_[p] && padBtns_[p][i]) return true;
     return false;
 }
 int Input::padCount() const {

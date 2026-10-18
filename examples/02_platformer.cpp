@@ -5,6 +5,7 @@
 #include <string>
 #include <cstring>
 #include <cmath>
+#include <cstdlib>
 
 int main() {
     forge::EngineConfig cfg;
@@ -105,6 +106,7 @@ int main() {
     cam.zoom = 2.0f;
 
     bool wasGround = false;
+    int frames = 0;
     engine.runFixed(
         [&](float dt) { // update
             auto& in = engine.input();
@@ -162,6 +164,10 @@ int main() {
             batch.drawRectOutline({p->pos.x - 11, p->pos.y - 14, 22, 28},
                                   forge::Color::white(), 1.5f);
             batch.end();
+            if (++frames >= 600) { // auto-exit for CI; remove for play
+                if (std::getenv("CI")) engine.quit();
+                frames = 0;
+            }
         });
     std::printf("landings detected: %d\n", landings);
     return 0;

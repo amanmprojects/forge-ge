@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstring>
 #include <cstdint>
+#include <cstdlib>
 
 // Write a 16-bit mono WAV into memory.
 static std::vector<uint8_t> makeWav(float freq, float dur, float vol, bool noise) {
@@ -87,7 +88,10 @@ int main() {
             font.draw(batch, buf, {-350, -160}, 0.8f, forge::Color::white());
         }
         batch.end();
-        if (++frames >= 600 && !blip1.valid()) engine.quit(); // muted CI: still exercises path
+        if (++frames >= 600) { // muted audio or CI: auto-exit; remove for play
+            if (!blip1.valid() || std::getenv("CI")) engine.quit();
+            frames = 0;
+        }
     });
     return 0;
 }

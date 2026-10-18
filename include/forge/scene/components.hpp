@@ -34,10 +34,19 @@ struct Velocity {
     float maxSpeed = 0.0f; // 0 = unlimited
 };
 
+// Physics box around the entity's Transform. Scene::update syncs every
+// entity that has BOTH Transform and Collider into its PhysicsWorld: entities
+// that also have a Velocity become dynamic bodies, the rest are static.
+// After the step, non-static bodies are written back to Transform/Velocity.
+// Use scene.physics() directly for kinematic control, gravity tuning, or
+// bodies outside the ECS.
 struct Collider {
-    Vec2 halfExtents{16, 16}; // box around transform
-    bool solid = true;
-    bool sensor = false;
+    Vec2 halfExtents{16, 16}; // box around transform (full size = 2*halfExtents)
+    bool solid = true;        // false: overlaps are reported, but no pushback
+    bool sensor = false;      // report contacts without resolving
+    bool kinematic = false;   // script-moved platform: pushes dynamics, not pushed
+    float friction = 0.0f;    // ground friction when resting on it
+    float gravityScale = 1.0f;
 };
 
 struct Tag {

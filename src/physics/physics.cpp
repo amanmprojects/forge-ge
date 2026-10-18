@@ -10,53 +10,76 @@ uint32_t PhysicsWorld::addBody(const Body& b) {
     nb.id = nextId_++;
     nb.onGround = false;
     bodies_.push_back(nb);
+    byId_[nb.id] = bodies_.size() - 1;
+    gridDirty_ = true;
     return nb.id;
 }
 
 void PhysicsWorld::removeBody(uint32_t id) {
-    bodies_.erase(std::remove_if(bodies_.begin(), bodies_.end(),
-        [id](const Body& b) { return b.id == id; }), bodies_.end());
+    auto it = byId_.find(id);
+    if (it == byId_.end()) return;
+    size_t idx = it->second;
+    Body moved = bodies_.back();      // swap-erase: O(1), order-stable enough
+    bodies_[idx] = moved;
+    bodies_.pop_back();
+    byId_.erase(it);
+    if (idx < bodies_.size()) byId_[moved.id] = idx;
+    gridDirty_ = true;
 }
 
-void PhysicsWorld::clear() { bodies_.clear(); }
+void PhysicsWorld::clear() {
+    bodies_.clear();
+    byId_.clear();
+    gridDirty_ = true;
+}
 
 Body* PhysicsWorld::get(uint32_t id) {
-    for (auto& b : bodies_) if (b.id == id) return &b;
-    return nullptr;
+    // A non-const handle is a write opportunity (pos/size/...): treat the
+    // cached query grid as stale so the next queryRect() reflects the edit.
+    gridDirty_ = true;
+    auto it = byId_.find(id);
+    return it == byId_.end() ? nullptr : &bodies_[it->second];
 }
 const Body* PhysicsWorld::get(uint32_t id) const {
-    for (auto& b : bodies_) if (b.id == id) return &b;
-    return nullptr;
+    auto it = byId_.find(id);
+    return it == byId_.end() ? nullptr : &bodies_[it->second];
 }
 
-static int64_t cellKey(int x, int y) {
+int64_t PhysicsWorld::cellKey(int x, int y) {
     return ((int64_t)(uint32_t)x << 32) | (uint32_t)y;
 }
 
-void PhysicsWorld::broadphase(std::vector<std::pair<int,int>>& pairs) const {
-    pairs.clear();
-    std::unordered_map<int64_t, std::vector<int>> grid;
-    grid.reserve(bodies_.size() * 2);
-
+// Rebuilds grid_ for the current body AABBs. Bucket vectors keep their
+// capacity, so after warm-up this does not allocate.
+void PhysicsWorld::rebuildGrid() const {
+    for (auto& kv : grid_) kv.second.clear();
     for (size_t i = 0; i < bodies_.size(); ++i) {
         Rect r = bodies_[i].aabb();
         int x0 = (int)std::floor(r.x / cellSize_), x1 = (int)std::floor((r.x + r.w) / cellSize_);
         int y0 = (int)std::floor(r.y / cellSize_), y1 = (int)std::floor((r.y + r.h) / cellSize_);
         for (int cy = y0; cy <= y1; ++cy)
             for (int cx = x0; cx <= x1; ++cx)
-                grid[cellKey(cx, cy)].push_back((int)i);
+                grid_[cellKey(cx, cy)].push_back((int)i);
     }
-    for (auto& kv : grid) {
+    gridDirty_ = false;
+}
+
+// Fills the reusable pairs_ scratch from grid_. No steady-state allocation.
+void PhysicsWorld::broadphase() {
+    pairs_.clear();
+    rebuildGrid();
+    for (auto& kv : grid_) {
         auto& cell = kv.second;
         for (size_t a = 0; a < cell.size(); ++a)
             for (size_t b = a + 1; b < cell.size(); ++b) {
                 int i = cell[a], j = cell[b];
                 if (i > j) std::swap(i, j);
-                pairs.emplace_back(i, j);
+                pairs_.emplace_back(i, j);
             }
     }
-    std::sort(pairs.begin(), pairs.end());
-    pairs.erase(std::unique(pairs.begin(), pairs.end()), pairs.end());
+    // A pair straddling several cells is emitted once per shared cell.
+    std::sort(pairs_.begin(), pairs_.end());
+    pairs_.erase(std::unique(pairs_.begin(), pairs_.end()), pairs_.end());
 }
 
 bool PhysicsWorld::collide(const Body& a, const Body& b, Contact& out) {
@@ -99,9 +122,8 @@ void PhysicsWorld::step(float dt) {
         }
 
         // collide
-        std::vector<std::pair<int,int>> pairs;
-        broadphase(pairs);
-        for (auto [i, j] : pairs) {
+        broadphase();
+        for (auto [i, j] : pairs_) {
             Body& a = bodies_[(size_t)i];
             Body& b = bodies_[(size_t)j];
             bool aStat = a.type == BodyType::Static;
@@ -151,18 +173,38 @@ void PhysicsWorld::step(float dt) {
             }
         }
     }
+    // Contacts moved bodies after the last broadphase: the cached query grid
+    // no longer matches the final positions, so mark it stale.
+    gridDirty_ = true;
 }
 
 std::vector<uint32_t> PhysicsWorld::queryRect(Rect r) const {
+    if (gridDirty_) rebuildGrid();
+    // Candidate indices from overlapped cells (dedup: a body spans several
+    // cells, and AABB overlap needs exact testing anyway).
+    queryScratch_.clear();
+    int x0 = (int)std::floor(r.x / cellSize_), x1 = (int)std::floor((r.x + r.w) / cellSize_);
+    int y0 = (int)std::floor(r.y / cellSize_), y1 = (int)std::floor((r.y + r.h) / cellSize_);
+    for (int cy = y0; cy <= y1; ++cy)
+        for (int cx = x0; cx <= x1; ++cx) {
+            auto it = grid_.find(cellKey(cx, cy));
+            if (it == grid_.end()) continue;
+            for (int i : it->second) queryScratch_.push_back(i);
+        }
+    std::sort(queryScratch_.begin(), queryScratch_.end());
+    queryScratch_.erase(std::unique(queryScratch_.begin(), queryScratch_.end()),
+                        queryScratch_.end());
     std::vector<uint32_t> out;
-    for (auto& b : bodies_) {
-        if (b.aabb().overlaps(r)) out.push_back(b.id);
-    }
+    out.reserve(queryScratch_.size());
+    for (int i : queryScratch_)
+        if (bodies_[(size_t)i].aabb().overlaps(r)) out.push_back(bodies_[(size_t)i].id);
     return out;
 }
 
 bool PhysicsWorld::raycast(Vec2 from, Vec2 to, uint32_t* hitId, Vec2* hitPos) const {
-    // slab test per body, nearest t wins
+    // slab test per body, nearest entry t wins. A ray whose ORIGIN is inside
+    // a body skips that body entirely (tmin == 0 would make every enclosing
+    // box a hit at distance 0 and hide the surface further along the ray).
     Vec2 d = to - from;
     float best = 1.0f + EPSILON;
     const Body* bestB = nullptr;
@@ -189,7 +231,7 @@ bool PhysicsWorld::raycast(Vec2 from, Vec2 to, uint32_t* hitId, Vec2* hitPos) co
                 tmin = std::max(tmin, t1); tmax = std::min(tmax, t2);
             }
         }
-        if (ok && tmin <= tmax && tmin < best) {
+        if (ok && tmin <= tmax && tmin > 0.0f && tmin < best) {
             best = tmin;
             bestB = &b;
         }

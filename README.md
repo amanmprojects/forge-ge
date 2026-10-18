@@ -24,7 +24,7 @@ still one per flush, never one per sprite.
 | `graphics` | `SpriteBatch` (8192 quads/flush, 16 texture slots), `Camera2D` (follow, trauma shake), `Texture2D`, `Font` (TTF atlas), `Framebuffer`, `ParticleSystem`, `Animator` + `Tweens`, `Tilemap` (CSV + Tiled JSON, culling, solid queries) |
 | `physics` | AABB `PhysicsWorld` (spatial-hash broadphase, substeps, friction/restitution, sensors, raycast, rect queries) |
 | `audio` | `AudioEngine` (WAV/MP3/OGG/FLAC via miniaudio, 32-voice pool, music/sfx buses, pan/pitch/loop) |
-| `scene` | Generational `ECS Registry` (sparse-set pools, `view<Ts>`), `Scene` with `Transform/Sprite/Velocity/Collider/Script` |
+| `scene` | Generational `ECS Registry` (sparse-set pools, `view<Ts>`), `Scene` with `Transform/Sprite/Velocity/Collider/Script` — collider entities sync into `Scene::physics()` automatically (Velocity present = dynamic, else static) |
 | `assets` | `AssetManager` (texture/font/sound cache + mtime hot-reload) |
 | `utils` | `Profiler` (scoped zones, frame graph, compiles to no-ops with `FORGE_PROFILING=0`) |
 
@@ -50,13 +50,15 @@ ctest --test-dir build          # headless unit tests (math/ecs/physics/tilemap/
 ./build/01_hello                # shapes + text + camera (WASD, SPACE shakes)
 ./build/02_platformer           # physics platformer (arrows/space, R resets)
 ./build/04_audio                # synthesized SFX (1/2/3, M for music)
-./build/05_scene                # 60-entity ECS swarm (SPACE pulse)
+./build/05_scene                # 60-entity ECS swarm + falling crates (SPACE pulse)
 ./build/06_verify               # render-correctness self-test (exit 0 = colors/positions/batch within tolerance)
 ```
 
 CMake options: `-DFORGE_BUILD_EXAMPLES=OFF`, `-DFORGE_BUILD_TESTS=OFF`,
 `-DFORGE_ENABLE_PROFILING=OFF` (the CMake *option*;
-the code macro it drives is `FORGE_PROFILING`, always defined 0/1).
+the code macro it drives is `FORGE_PROFILING`, always defined 0/1),
+`-DFORGE_ENABLE_SANITIZERS=ON|OFF` (ASan+UBSan; default ON for single-config
+Debug builds).
 
 ## Threading
 

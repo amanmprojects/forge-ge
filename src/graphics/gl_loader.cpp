@@ -1,4 +1,5 @@
 #include "forge/graphics/gl_loader.hpp"
+#include "forge/core/logger.hpp"
 
 namespace forge::gl {
 
@@ -13,9 +14,11 @@ bool load(ProcLoader loader) {
     int missing = 0;
 #define X(name, ret, args) \
     name = (name##Proc)loader(#name); \
-    if (!name) ++missing;
+    if (!name) { ++missing; FORGE_LOG_ERROR("GL: missing symbol %s", #name); }
     FORGE_GL_LIST
 #undef X
+    if (missing > 0)
+        FORGE_LOG_ERROR("GL: %d required symbol(s) missing; GL support disabled", missing);
     s_loaded = (missing == 0);
     return s_loaded;
 }
