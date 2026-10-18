@@ -28,6 +28,15 @@ still one per flush, never one per sprite.
 | `assets` | `AssetManager` (texture/font/sound cache + mtime hot-reload) |
 | `utils` | `Profiler` (scoped zones, frame graph, compiles to no-ops with `FORGE_PROFILING=0`) |
 
+## Documentation
+
+Agent-oriented docs live in [`docs/`](docs/README.md). Start with
+[`docs/agents/00-overview.md`](docs/agents/00-overview.md) (architecture and
+conventions), use [`docs/agents/09-recipes.md`](docs/agents/09-recipes.md) for
+copyable task patterns, and check
+[`docs/agents/10-pitfalls.md`](docs/agents/10-pitfalls.md) before debugging.
+[`AGENTS.md`](AGENTS.md) is the condensed fast path for coding agents.
+
 ## Requirements
 
 - C++20 compiler (GCC 13+, Clang 16+), CMake 3.20+, Ninja/Make
@@ -179,7 +188,8 @@ scene.registry().emplace<forge::Velocity>(e, forge::Velocity{{60, 0}});
 - **No per-frame allocations** in hot paths (particles swap-remove, physics
   reuses vectors, ECS pools are flat arrays).
 - **Cache-friendly ECS**: components live in contiguous sparse-set pools;
-  `view<Ts>()` iterates the smallest pool.
+  `view<Ts>()` iterates the pool of the first listed component and filters by
+  the rest (list the most selective component first).
 - **Spatial-hash broadphase** + fixed-substep solver keeps physics
   deterministic and tunnel-resistant at 60 Hz.
 - **Header-only math**, `constexpr` where possible, no virtual calls or RTTI
