@@ -538,6 +538,61 @@ static void testInputSurface() {
     std::printf("input-surface ok\n");
 }
 
+// Regression: input edges must survive frames that run zero fixed steps.
+// runFixed pumps events once per rendered frame, but the stepper may run
+// 0..maxSteps updates; the old code committed input at the top of every
+// rendered frame, so a press latched on a 0-step frame was cleared before
+// any update could see it (needed 2-3 presses to register at 144Hz vsync
+// against a 60Hz step). The loop now commits (endFrame) after each update
+// actually observes the window, delivering every edge exactly once.
+static void testInputStepWindow() {
+    Input in;
+    // Frame 1: key pressed, but the stepper ran 0 steps (no commit yet).
+    in.setKey(Key::P, true);
+    CHECK(in.pressed(Key::P));
+    // Frame 2: one step runs; the update must see the press exactly once.
+    int seen = 0;
+    for (int step = 0; step < 1; ++step) {
+        if (in.pressed(Key::P)) ++seen;
+        in.endFrame(); // commit after each observed step (runFixed)
+    }
+    CHECK(seen == 1);
+    CHECK(in.isDown(Key::P));     // key still held...
+    CHECK(!in.pressed(Key::P));   // ...but the edge was consumed
+
+    // Two steps in one frame observe the same edge only once.
+    in.setKey(Key::R, true);
+    seen = 0;
+    for (int step = 0; step < 2; ++step) {
+        if (in.pressed(Key::R)) ++seen;
+        in.endFrame();
+    }
+    CHECK(seen == 1);
+
+    // Release edges get the same treatment.
+    in.setKey(Key::R, false);
+    CHECK(in.released(Key::R));   // latches on a 0-step frame...
+    seen = 0;
+    for (int step = 0; step < 1; ++step) {
+        if (in.released(Key::R)) ++seen;
+        in.endFrame();
+    }
+    CHECK(seen == 1);
+    CHECK(!in.isDown(Key::R) && !in.released(Key::R));
+
+    // A tap (down AND up) inside a 0-step frame is seen by the next step.
+    in.setKey(Key::J, true);
+    in.setKey(Key::J, false);
+    bool tap = false;
+    for (int step = 0; step < 1; ++step) {
+        tap = in.pressed(Key::J) && in.released(Key::J) && !in.isDown(Key::J);
+        in.endFrame();
+    }
+    CHECK(tap);
+    CHECK(!in.pressed(Key::J) && !in.released(Key::J));
+    std::printf("input-step-window ok\n");
+}
+
 static void testTilemap() {
     Tilemap map;
     map.create(4, 4, 16, 16);
@@ -807,6 +862,7 @@ int main() {
     testCamera();
     testInput();
     testInputSurface();
+    testInputStepWindow();
     testTilemap();
     testTilemapJson();
     testAnim();

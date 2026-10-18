@@ -56,7 +56,8 @@ Frame-loop behavior worth knowing:
 
 | | `runVariable` | `runFixed` | manual `beginFrame` |
 |---|---|---|---|
-| pumps events / input frame | yes | yes | yes |
+| pumps events | yes | yes | yes |
+| input commit (edges consumed) | after `frame(dt)` | after each `update` step | at `beginFrame` |
 | advances `Time` | yes | yes | yes (`time().delta()`) |
 | calls your code | 1× per frame with clamped dt | `update` 0..maxSteps×, then `render` 1× | you decide |
 | buffer swap | engine | engine | `endFrame` |
@@ -64,10 +65,18 @@ Frame-loop behavior worth knowing:
 | `assets().update()` hot-reload poll | yes | yes | **no** (call it yourself) |
 | interp alpha given | — | no | — |
 
-`beginFrame(viewProj)` does: profiler begin → `input().beginFrame()` → event
-pump (returns false on quit) → `time().tick()` → `batch().resetStats()` →
-full-viewport `glViewport` → `batch().begin(viewProj)`. So inside a manual
-loop the batch is already begun; draw, then `endFrame()`.
+`beginFrame(viewProj)` does: profiler begin → `input().beginFrame()` (commit the
+previous input window) → event pump (returns false on quit) → `time().tick()` →
+`batch().resetStats()` → full-viewport `glViewport` → `batch().begin(viewProj)`.
+So inside a manual loop the batch is already begun; draw, then `endFrame()`.
+
+Input edges are delivered to the code that observes them, exactly once: in
+`runFixed` the commit happens after every `update` step, so a key pressed
+during a frame that ran **zero** steps still reports `pressed()` on the next
+step (at 144 Hz vsync against a 60 Hz step most frames are 0-step). In
+`runVariable` the commit is after `frame(dt)`. In a manual loop
+`Engine::beginFrame()` commits at the start of the frame. See the Input
+section below.
 
 `clear()` targets the currently bound framebuffer (with the window viewport).
 If a `Framebuffer` is bound you'll clear the FBO instead — see 04.
@@ -138,8 +147,10 @@ rendering.
 
 ## Input
 
-Polled once per frame (by `Engine` or your `beginFrame`). Queries are cheap
-and can be called repeatedly.
+Filled by the SDL event pump once per rendered frame; committed ("end of
+input window") after the code that consumes it actually runs — after each
+`update` step in `runFixed`, after `frame(dt)` in `runVariable`, at
+`beginFrame` in a manual loop. Queries are cheap and can be called repeatedly.
 
 ### Keyboard
 
@@ -153,22 +164,25 @@ terminates the enum.
 
 ```cpp
 bool isDown(Key) const;      // held
-bool pressed(Key) const;     // went down this frame (incl. sub-frame tap)
-bool released(Key) const;    // went up this frame
+bool pressed(Key) const;     // went down this input window (incl. sub-step tap)
+bool released(Key) const;    // went up this input window
 static Key keyFromName(std::string_view);  // "space","escape","enter","tab","up"…,"a".."z","0".."9"
 ```
 
 `pressed()`/`released()` also report taps that went down *and* up between two
-frames (a latch is set on the transition and cleared at `beginFrame`), so
-single-frame taps can't be missed by slow update code.
+commits (a latch is set on the transition and cleared when the window
+commits), so single-step taps can't be missed by slow update code. Every edge
+is observed exactly once: it survives as many 0-step frames as it takes until
+an `update` runs, and a frame that runs several steps reports it in the first
+step only.
 
 ### Mouse
 
 ```cpp
 bool mouseDown/MousePressed/MouseReleased(MouseButton) const; // Left,Right,Middle,X1,X2
 Vec2 mousePos() const;     // drawable pixels, top-left origin
-Vec2 mouseDelta() const;   // this frame - last frame
-Vec2 wheel() const;        // accumulated scroll this frame ({0,0} normally)
+Vec2 mouseDelta() const;   // this window - previous window
+Vec2 wheel() const;        // accumulated scroll this window ({0,0} normally)
 ```
 
 `mousePos()` is converted to drawable pixels for you. World position:
@@ -228,9 +242,10 @@ void pushText(const char* utf8);   // fed from SDL_TEXT_INPUT by Engine
 std::string consumeText();         // takes and clears this frame's text
 ```
 
-Useful for high-score name entry. Text accumulates during the frame and is
-cleared at the start of the next `beginFrame` — consume it once per frame if
-you care about the content.
+Useful for high-score name entry. Text accumulates during the current input
+window and is cleared when it commits (after `frame(dt)` / after each
+`update` step / at the next `beginFrame` in a manual loop) — the code that
+consumes it gets it exactly once.
 
 ## Logger
 

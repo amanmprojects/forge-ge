@@ -42,19 +42,23 @@ public:
     AudioEngine& audio() { return audio_; }
     AssetManager& assets() { return assets_; }
 
-    // One-shot: pump events, begin batch. Returns false when quitting.
-    // Contract: if this returns false, do NOT call endFrame() (no batch was
-    // begun). Profiler/input bookkeeping is left balanced either way.
+    // One-shot: pump events, commit the previous input window, begin batch.
+    // Returns false when quitting. Contract: if this returns false, do NOT
+    // call endFrame() (no batch was begun). Profiler/input bookkeeping is
+    // left balanced either way.
     bool beginFrame(const Mat4& viewProj);
     void endFrame();
 
     // Clear the default framebuffer (helper so games don't touch GL directly).
     void clear(float r, float g, float b, float a = 1.0f);
 
-    // Full loop. update(dt) may be called 0..maxSteps times per frame.
+    // Full loop. update(dt) may be called 0..maxSteps times per frame; input
+    // edges are committed after each update that ran, so a press latched on a
+    // 0-step frame is delivered (exactly once) to the next update.
     // render(alpha) draws with batch (begin/end handled by you or use beginFrame).
     // Simplest: runFixed(update, render) or runVariable(fn).
     void runFixed(std::function<void(float)> update, std::function<void()> render);
+    // frame(dt) runs once per frame; the input window commits when it returns.
     void runVariable(std::function<void(float)> frame);
 
     void quit() { quitting_ = true; }

@@ -39,7 +39,8 @@ The headers are the source of truth for signatures. These docs explain the
    │        Engine        │   owns Window, Input, Time, SpriteBatch,
    │  runVariable/runFixed│   AudioEngine, AssetManager, fixed stepper
    └──────────┬───────────┘
-              │ one frame: input.beginFrame → events → time.tick → update → render → swap
+              │ one frame: events → time.tick → update(0..maxSteps) → render → swap
+              │            (input commits after each observed update step)
               ▼
    SpriteBatch ──► one shader, one VBO, flushed per 8192 quads / 16 textures
 ```
@@ -81,7 +82,9 @@ Two ways to own the frame:
 **A. Callback loops** — `Engine::runFixed(update, render)` /
 `Engine::runVariable(frame)`. The engine pumps events, ticks time, calls your
 code, swaps buffers, paces (if `maxFps` set), and calls `AssetManager::update()`
-for you each pass. `update` can run 0..`maxSteps` times per frame.
+for you each pass. `update` can run 0..`maxSteps` times per frame; input edges
+are committed after each step that actually ran, so a press on a 0-step frame
+is still delivered (exactly once) to the next step.
 
 **B. Manual** — call `beginFrame(viewProj)` / `endFrame()` yourself
 (e.g. to step the simulation deterministically for screenshots). `beginFrame`

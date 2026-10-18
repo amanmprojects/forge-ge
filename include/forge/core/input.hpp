@@ -1,6 +1,8 @@
 #pragma once
 // Input: keyboard / mouse / gamepad polling + action mapping.
-// Polled once per frame by Engine; query with isDown / pressed / released.
+// Engine feeds it from the SDL event pump; query with isDown / pressed /
+// released. Edges are committed after each observed update step, so a press
+// is never lost on a frame that ran no fixed steps (see Input::endFrame).
 // Actions let gameplay bind "jump" -> {Space, GamepadA} instead of raw keys.
 
 #include "forge/math/math.hpp"
@@ -40,12 +42,16 @@ public:
     ~Input();
 
     // --- frame lifecycle (called by Engine) ---
-    // Copies current -> previous and clears the press/release latches.
+    // endFrame() commits the current input window: current -> previous and
+    // clears the press/release latches, wheel and text buffer. The Engine
+    // frame loops call it after each update step (or after frame(dt) in
+    // runVariable), so an edge latched on a 0-step frame stays visible until
+    // an update actually observes it, and is observed exactly once.
     // pressed()/released() also report taps that both went down AND up
-    // between two beginFrame() calls (a key tapped inside one frame would
-    // otherwise be invisible to both queries).
-    void beginFrame();
-    void endFrame() {}   // reserved
+    // between two commits (a key tapped inside one step would otherwise be
+    // invisible to both queries).
+    void beginFrame();   // starts an input window (= endFrame commit)
+    void endFrame();     // commits the window, clears one-shot state
     void handleWindowEvent(); // pumps mouse position etc. if needed
 
     // Called by Engine's SDL event pump:
@@ -112,8 +118,8 @@ private:
     float axes_[kPads][kAxes] = {};
     bool padConnected_[kPads] = {};
 
-    // Set on a real down/up transition; cleared by beginFrame(). See the
-    // beginFrame comment: keeps sub-frame taps visible to pressed()/released().
+    // Set on a real down/up transition; cleared by endFrame(). See the
+    // endFrame comment: keeps sub-step taps visible to pressed()/released().
     bool keyPressLatch_[kKeys] = {}, keyReleaseLatch_[kKeys] = {};
     bool mousePressLatch_[kMouse] = {}, mouseReleaseLatch_[kMouse] = {};
     bool padPressLatch_[kPads][kPadBtns] = {}, padReleaseLatch_[kPads][kPadBtns] = {};

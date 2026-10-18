@@ -8,6 +8,14 @@ Input::Input() = default;
 Input::~Input() = default;
 
 void Input::beginFrame() {
+    endFrame();
+}
+
+void Input::endFrame() {
+    // Commit the current input window: fold current -> previous and clear the
+    // one-shot state (latches, wheel, text). Engine::runFixed/runVariable call
+    // this after each observed update step, so a down-edge latched during a
+    // frame that ran no steps stays visible until some update sees it.
     std::memcpy(prevKeys_, keys_, sizeof(keys_));
     std::memcpy(prevMouse_, mouse_, sizeof(mouse_));
     std::memcpy(prevPadBtns_, padBtns_, sizeof(padBtns_));

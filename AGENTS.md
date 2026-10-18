@@ -42,7 +42,9 @@ and tests compile with `-Wall -Wextra -Wpedantic` and must stay warning-free.
   default-constructed before the config applies). Use
   `engine.window().setTitle(...)` at runtime for the title.
 - Fixed-step update may run 0..maxSteps times per frame; keep `update`
-  deterministic and `render` free of simulation state.
+  deterministic and `render` free of simulation state. Input edges commit
+  after each observed step — a press on a 0-step frame is delivered once to
+  the next `update`, never dropped and never seen twice.
 - Physics is arcade-grade: no rotation, unit masses, one relaxation pass;
   default gravity `(0, -980)`. `Body*` pointers die on `addBody/removeBody`.
 - ECS `view<Ts>()` must not create/destroy entities or add/remove components

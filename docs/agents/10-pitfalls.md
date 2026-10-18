@@ -39,7 +39,11 @@ times in one visible frame; physics "pauses" for a frame.
 and `render` exactly once.
 **Fix:** put simulation in `update` and rendering in `render`; never put
 "once per frame" UI logic in `update`. Use `Time::frame()` if you need a
-frame counter.
+frame counter. Input edges are the one intentional exception: they commit
+after each `update` that actually ran, so a press pumped during a 0-step
+frame waits for the next step instead of being lost (and a multi-step frame
+reports it to the first step only). Read input in `update`, not `render`:
+when a step ran, it consumed the edges before `render` sees them.
 
 ### 5. `Engine::clear` cleared the wrong thing
 
@@ -192,10 +196,16 @@ everywhere; do the same in your game.
 ### 21. `pressed()` true while `isDown()` false
 
 **Symptom:** code that combines `isDown && pressed` misses fast taps.
-**Cause:** press/release **latches** survive sub-frame taps on purpose (a tap
-that went down and up between two `beginFrame` calls reports both edges).
+**Cause:** press/release **latches** survive sub-step taps on purpose (a tap
+that went down and up between two commits reports both edges).
 **Fix:** use `pressed()` alone for edge actions; don't require `isDown()` at
 the same time.
+
+The commit points (which consume the edges) are: after each `update` step in
+`runFixed`, after `frame(dt)` in `runVariable`, and at `beginFrame()` in a
+manual loop. Every edge is therefore observed exactly once by the code that
+runs update/frame logic — the same key press can never be silently dropped by
+a 0-step frame, nor seen twice by a multi-step frame.
 
 ### 22. `moveAxis()` reads every connected gamepad
 

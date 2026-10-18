@@ -84,7 +84,9 @@ Notes:
 ### 1. Variable step — `runVariable(frame)`
 
 Use for menus, UI, anything frame-rate independent or not worth a fixed step.
-`frame(dt)` is called once per frame; you own rendering.
+`frame(dt)` is called once per frame; you own rendering. Input is committed
+right after your callback returns, so edges pumped this frame are visible to
+it (exactly once).
 
 ```cpp
 engine.runVariable([&](float dt) {
@@ -101,6 +103,12 @@ then `render()` **exactly once**. After a long hitch the backlog is dropped
 (no spiral of death). `render()` does not receive an interpolation alpha —
 design render to read the latest simulation state, or smooth in the objects
 themselves.
+
+Read input in `update`: each update step commits the input window when it
+returns. A key pressed during a frame that ran **0 steps** keeps its
+`pressed()` edge until the next step that runs, and a frame that runs several
+steps reports the edge to the first one only — so games never need
+"press it again" retries and never double-register a press.
 
 ```cpp
 forge::PhysicsWorld world;
@@ -137,7 +145,8 @@ for (int frame = 0; frame < 600; ++frame) {
 }
 ```
 
-`beginFrame` pumps events, advances `Time`, and calls `batch.begin(viewProj)`.
+`beginFrame` pumps events, commits the previous input window, advances `Time`,
+and calls `batch.begin(viewProj)`.
 On `false` (quit event) nothing was begun — calling `endFrame` would flush and
 swap an empty frame and unbalance the profiler.
 

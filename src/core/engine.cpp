@@ -273,12 +273,16 @@ void Engine::runFixed(std::function<void(float)> update, std::function<void()> r
     (void)cam;
     while (!quitting_) {
         Profiler::instance().beginFrame();
-        input_.beginFrame();
         if (!pumpEvents()) break;
         float dt = time_.tick();
         {
             FORGE_ZONE("update");
-            stepper_.update(dt, update);
+            stepper_.update(dt, [&](float step) {
+                update(step);
+                // Commit after each observed step: an edge latched during a
+                // 0-step frame survives until an update sees it (exactly once).
+                input_.endFrame();
+            });
         }
         {
             FORGE_ZONE("render");
@@ -295,11 +299,11 @@ void Engine::runFixed(std::function<void(float)> update, std::function<void()> r
 void Engine::runVariable(std::function<void(float)> frame) {
     while (!quitting_) {
         Profiler::instance().beginFrame();
-        input_.beginFrame();
         if (!pumpEvents()) break;
         float dt = time_.tick();
         batch_.resetStats();
         frame(dt);
+        input_.endFrame(); // frame() observed this window; commit it
         window_.swapBuffers();
         pace();
         Profiler::instance().endFrame();
