@@ -122,6 +122,13 @@ if(FORGE_BUILD_EXAMPLES)
         target_link_libraries("${name}" PRIVATE forge)
         target_compile_options("${name}" PRIVATE ${FORGE_WARNING_FLAGS})
     endforeach()
+
+    # 09_chess lives in its own folder: the rules engine and the bot are
+    # header-only, engine-free headers shared with tests/test_chess.cpp.
+    add_executable(09_chess examples/chess/main.cpp)
+    target_link_libraries(09_chess PRIVATE forge)
+    target_include_directories(09_chess PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/examples/chess")
+    target_compile_options(09_chess PRIVATE ${FORGE_WARNING_FLAGS})
 endif()
 
 # ---- Tests ----
@@ -131,4 +138,10 @@ if(FORGE_BUILD_TESTS)
     target_link_libraries(test_engine PRIVATE forge)
     target_compile_options(test_engine PRIVATE ${FORGE_WARNING_FLAGS})
     add_test(NAME test_engine COMMAND test_engine)
+
+    # Headless chess rules/perft/AI suite — no forge dependency by design.
+    add_executable(test_chess tests/test_chess.cpp)
+    target_include_directories(test_chess PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+    target_compile_options(test_chess PRIVATE ${FORGE_WARNING_FLAGS})
+    add_test(NAME test_chess COMMAND test_chess)
 endif()

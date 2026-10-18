@@ -14,6 +14,7 @@ cmake --build build -j
 ctest --test-dir build                     # headless unit tests
 ./build/01_hello                           # shapes + text + camera
 CI=1 ./build/07_breakout --frames 240      # smoke run, exit 0/1
+CI=1 ./build/09_chess                      # same for chess, exit 0/1
 ```
 
 Debug single-config builds get ASan+UBSan automatically. The library, examples
@@ -26,7 +27,7 @@ and tests compile with `-Wall -Wextra -Wpedantic` and must stay warning-free.
 3. The relevant API page (`02-core` … `08-audio-assets`)
 4. [`docs/agents/09-recipes.md`](docs/agents/09-recipes.md) — task patterns (HUD, camera, physics, capture, …)
 5. [`docs/agents/10-pitfalls.md`](docs/agents/10-pitfalls.md) — check before debugging
-6. `examples/` — the eight examples are the canonical usage reference
+6. `examples/` — the nine examples are the canonical usage reference
 
 ## Ground rules
 
@@ -55,6 +56,10 @@ and tests compile with `-Wall -Wextra -Wpedantic` and must stay warning-free.
 - The example games are also tests: `--shot file.png` writes a deterministic
   PNG, `CI=1` runs a smoke mode with an exit code. Copy
   `examples/07_breakout.cpp` for that pattern.
+- `examples/chess/chess.hpp` (0x88 rules) and `examples/chess/ai.hpp` (negamax
+  + eval) are engine-free, header-only and shared with `tests/test_chess.cpp`
+  (perft + rules suite). Only `examples/chess/main.cpp` touches Forge, so the
+  chess core can change without rebuilding the library and stays headless.
 
 ## Doc map
 
@@ -84,6 +89,7 @@ and tests compile with `-Wall -Wextra -Wpedantic` and must stay warning-free.
 | `examples/06_verify.cpp` | render-correctness self-test (offscreen readback, color tolerance) |
 | `examples/07_breakout.cpp` | full game: grid collision without physics, headless `--shot` capture, autopilot, pause |
 | `examples/08_snake.cpp` | full game: tile grid, chiptune SFX synthesis, title/pause/game-over states, golden bonus logic |
+| `examples/chess/main.cpp` | full game: rules-complete chess (0x88 + Zobrist + SAN), negamax bot with 5 levels, promotion/undo/hint/flip UI, `--fen`/`--moves`/`--click` scripted input |
 
 ## Conventions of this repo
 

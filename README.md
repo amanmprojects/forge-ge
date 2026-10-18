@@ -3,7 +3,7 @@
 # Forge — a batteries-included 2D game engine in C++
 
 Forge is a high-performance, dependency-light C++20 engine for 2D games.
-One static library, one umbrella header, eight runnable examples.
+One static library, one umbrella header, nine runnable examples.
 
 **System dependencies: SDL3 + OpenGL only.** Everything else
 (`stb_image`, `stb_truetype`, `miniaudio`, the GL loader) is vendored in
@@ -54,7 +54,7 @@ sudo apt install cmake ninja-build  # then build SDL3 from source
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
-ctest --test-dir build          # headless unit tests (math/ecs/physics/tilemap/anim)
+ctest --test-dir build          # headless unit tests (engine + chess perft suite)
 ./build/03_benchmark 10000      # 10k-sprite stress test, auto-exits, prints stats
 ./build/01_hello                # shapes + text + camera (WASD, SPACE shakes)
 ./build/02_platformer           # physics platformer (arrows/space, R resets)
@@ -63,6 +63,7 @@ ctest --test-dir build          # headless unit tests (math/ecs/physics/tilemap/
 ./build/06_verify               # render-correctness self-test (exit 0 = colors/positions/batch within tolerance)
 ./build/07_breakout             # Atari Breakout (A/D · arrows · mouse · gamepad, SPACE launch, ESC pause)
 ./build/08_snake                # classic Snake (WASD/arrows/gamepad, ESC pause, golden apples, bot demo)
+./build/09_chess                # full chess: click/drag or arrows+Enter, 5 bot levels, U/F/H/N/ESC
 ```
 
 CMake options: `-DFORGE_BUILD_EXAMPLES=OFF`, `-DFORGE_BUILD_TESTS=OFF`,
@@ -71,12 +72,18 @@ the code macro it drives is `FORGE_PROFILING`, always defined 0/1),
 `-DFORGE_ENABLE_SANITIZERS=ON|OFF` (ASan+UBSan; default ON for single-config
 Debug builds).
 
-### Headless capture (`07_breakout`, `08_snake`)
+### Headless capture (`07_breakout`, `08_snake`, `09_chess`)
 
-Both games double as render/sim tests: with `--shot` they run N fixed 1/60 s
-steps under a scripted autopilot, render the final frame into an offscreen
-`Framebuffer` and write a PNG. Everything is seeded (`--seed`) and clock-free,
-so the same arguments reproduce the same pixels — usable as a screenshot test.
+All three games double as render/sim tests: with `--shot` they run N fixed
+1/60 s steps under a scripted autopilot (bot vs bot for chess), render the
+final frame into an offscreen `Framebuffer` and write a PNG. Everything is
+seeded (`--seed`) and clock-free, so the same arguments reproduce the same
+pixels — usable as a screenshot test.
+
+`09_chess` is the biggest of the three: a rules-complete chess game (castling
+legality, en passant, promotion, check/mate/stalemate, threefold repetition,
+fifty-move rule, insufficient material) whose 0x88 board, SAN and negamax bot
+are a C++ port of `amanmprojects/chess`.
 
 ```bash
 ./build/07_breakout --shot play.png --frames 900                 # mid-game
@@ -92,6 +99,16 @@ CI=1 ./build/07_breakout --frames 240                            # smoke run, ex
 ./build/08_snake --shot paused.png --frames 500 --pause-at 450   # pause overlay
 ./build/08_snake --demo                                          # watch the autopilot play
 CI=1 ./build/08_snake --frames 240                               # smoke run, exit 0/1
+
+./build/09_chess --shot game.png --frames 420                    # bot vs bot, mid-game
+./build/09_chess --shot mate.png --frames 900                    # played out to a result
+./build/09_chess --shot title.png --title                        # title screen
+./build/09_chess --shot paused.png --frames 60 --press ESC       # pause overlay
+./build/09_chess --shot hint.png --moves "e4 e5 Nf3" --press H   # hint arrow + panel
+./build/09_chess --shot play.png --click "e2>e4,g1>f3"           # scripted drags
+./build/09_chess --shot promo.png --click a7,a8 \
+    --fen "4k3/P6p/8/8/8/8/8/4K3 w - - 0 1"                      # promotion dialog
+CI=1 ./build/09_chess                                            # plays a game, exit 0/1
 ```
 
 Text is drawn with a TTF picked from the usual system paths (DejaVu Sans Mono
@@ -102,10 +119,12 @@ procedural.
 
 `--shot` also prints `sane=0|1` from an invariant check (Breakout: no NaN,
 ball/paddle inside the field, speed capped; Snake: no NaN timers, body/food
-inside the grid, step time in range) and exits non-zero if it trips or the
-PNG fails to write — so a CI job can assert the games still simulate and
-render instead of eyeballing screenshots. Run `--help` on either example for
-the full flag list (`--size`, `--no-ai`, `--sloppy`, …).
+inside the grid, step time in range; Chess: re-derived Zobrist hash matches
+the live one, game-over state matches the rules engine, a legal reply exists
+unless the game is over) and exits non-zero if it trips or the PNG fails to
+write — so a CI job can assert the games still simulate and render instead of
+eyeballing screenshots. Run `--help` on any example for the full flag list
+(`--size`, `--no-ai`, `--sloppy`, `--fen`, `--moves`, `--click`, …).
 
 ## Threading
 
@@ -204,8 +223,9 @@ scene.registry().emplace<forge::Velocity>(e, forge::Velocity{{60, 0}});
 include/forge/   public headers (forge.hpp umbrella)
 src/             implementations (core, graphics, physics, audio, scene, assets, utils)
 third_party/     stb_image, stb_truetype, stb_image_write, miniaudio (vendored)
-examples/        01_hello … 08_snake
-tests/           headless unit tests (ctest)
+examples/        01_hello … 09_chess
+examples/chess/  engine-free chess core (0x88 rules + bot) shared with tests/
+tests/           headless unit tests (ctest; engine suite + chess perft)
 ```
 
 ## Roadmap
