@@ -1,0 +1,28 @@
+// ForgeScript rules for 10_lantern. Edit this file and press F2 in-game.
+var collected = 0;
+var bonus = 0;
+
+fn reset() {
+    collected = 0;
+    bonus = 0;
+    return 0;
+}
+
+// Called once per lantern; `streak` is how many were picked up in a row.
+fn on_collect(streak) {
+    collected = collected + 1;
+    if (streak >= 3) { bonus = bonus + 5; }
+    return collected * 10 + bonus;
+}
+
+fn total() { return collected; }
+
+fn objective(left) {
+    if (left <= 0) { return "All lanterns lit. F5 saves, F9 loads."; }
+    if (left == 1) { return "One lantern left..."; }
+    return "Find the lanterns";
+}
+
+fn light_radius(base) {
+    return base + min(collected * 6, 60);
+}

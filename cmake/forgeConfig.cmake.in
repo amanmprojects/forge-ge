@@ -1,0 +1,15 @@
+@PACKAGE_INIT@
+
+include(CMakeFindDependencyMacro)
+find_dependency(OpenGL)
+
+# SDL3 is either a CMake package or a pkg-config module; the exported target
+# references whichever form was used at build time, so reproduce that choice.
+find_package(SDL3 QUIET)
+if(NOT TARGET SDL3::SDL3)
+    find_dependency(PkgConfig)
+    pkg_check_modules(SDL3 REQUIRED sdl3)
+endif()
+
+include("${CMAKE_CURRENT_LIST_DIR}/forgeTargets.cmake")
+check_required_components(forge)

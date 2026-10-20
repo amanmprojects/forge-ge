@@ -1,5 +1,8 @@
 build/
+build-*/
 cmake-build-*/
+web/dist/
+.vercel/
 .vscode/
 .idea/
 *.o

@@ -35,6 +35,10 @@ public:
 
     bool valid() const { return glReady_; }
 
+    // The config the engine was constructed with (window settings are applied
+    // before the GL context is created; see WindowConfig).
+    const EngineConfig& config() const { return cfg_; }
+
     Window& window() { return window_; }
     Input& input() { return input_; }
     Time& time() { return time_; }
@@ -77,6 +81,13 @@ private:
     bool initGL();
     void pace(); // frame limiter (EngineConfig::maxFps)
 
+    // One iteration of runFixed()/runVariable(). On the desktop these run in a
+    // plain while-loop; on the web emscripten_set_main_loop_arg drives them
+    // from requestAnimationFrame (the browser owns the frame callback).
+    void frameFixed();
+    void frameVariable();
+    static void loopTrampoline(void* userdata);
+
     Window window_;
     Input input_;
     Time time_;
@@ -89,6 +100,11 @@ private:
     bool quitting_ = false;
     void* gamepads_[4] = {};
     uint64_t lastSwap_ = 0;
+    // Loop bodies live here so the web trampoline can reach them.
+    std::function<void(float)> updateFn_;
+    std::function<void()> renderFn_;
+    std::function<void(float)> frameFn_;
+    bool fixedLoop_ = true;
 };
 
 } // namespace forge

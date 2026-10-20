@@ -84,9 +84,43 @@ public:
     bool anyPadDown(GamepadButton b) const;
     int padCount() const;
 
-    // Text input (for UI): fed by SDL_EVENT_TEXT_INPUT
+    // Text input (for UI): fed by SDL_EVENT_TEXT_INPUT. `consumeText` clears
+    // the buffer; `textBuffer` peeks. IME composition arrives through
+    // `setComposition` and is reported separately from committed text.
     void pushText(const char* utf8);
     std::string consumeText();
+    const std::string& textBuffer() const { return textBuf_; }
+    // IME composition preview (SDL_EVENT_TEXT_EDITING). Empty = not composing.
+    void setComposition(const char* utf8, int cursor = -1) {
+        composition_ = utf8 ? utf8 : "";
+        compositionCursor_ = cursor;
+    }
+    const std::string& composition() const { return composition_; }
+    int compositionCursor() const { return compositionCursor_; }
+    bool composing() const { return !composition_.empty(); }
+
+    // ---- touch ----
+    // SDL3 synthesizes mouse events from touch, so the mouse API keeps working;
+    // this adds the raw multi-touch state (ids are SDL finger ids).
+    struct TouchPoint {
+        int64_t id = 0;
+        Vec2 pos{};       // drawable pixels, top-left origin
+        Vec2 start{};     // where the finger went down
+        float pressure = 0.0f;
+    };
+    void touchDown(int64_t id, Vec2 pos, float pressure = 1.0f);
+    void touchMove(int64_t id, Vec2 pos, float pressure = 1.0f);
+    void touchUp(int64_t id);
+    void touchCancel(int64_t id);
+    // All active fingers (insertion order = down order).
+    const std::vector<TouchPoint>& touches() const { return touches_; }
+    const TouchPoint* touch(int64_t id) const;
+    bool touchActive() const { return !touches_.empty(); }
+    // True on the frame a finger first appeared (edge, committed per step).
+    bool touchPressed() const { return touchPressLatch_; }
+    bool touchReleased() const { return touchReleaseLatch_; }
+    // Distance moved since the finger went down (drag gesture helper).
+    Vec2 touchDrag(int64_t id) const;
 
     // --- action mapping ---
     void bindKey(const std::string& action, Key k);
@@ -96,6 +130,19 @@ public:
     bool actionPressed(const std::string& action) const;
     bool actionReleased(const std::string& action) const;
     void clearBinds() { binds_.clear(); }
+    // Serialized remaps: "action=KeyName,Mouse:left,Pad:a" lines, one action
+    // per line. saveBinds/loadBinds make player remaps persistent.
+    std::string serializeBinds() const;
+    bool deserializeBinds(const std::string& text, std::string* error = nullptr);
+    bool saveBinds(const std::string& path) const;
+    bool loadBinds(const std::string& path, std::string* error = nullptr);
+
+    // Stick response curve: 0 = linear, >0 adds a deadzone and a power curve
+    // (1 = quadratic-ish). Applied by moveAxis().
+    void setStickDeadzone(float dz) { stickDeadzone_ = clamp01(dz); }
+    void setStickCurve(float power) { stickCurve_ = power < 0.0f ? 0.0f : power; }
+    float stickDeadzone() const { return stickDeadzone_; }
+    float stickCurve() const { return stickCurve_; }
 
     // Axis-style movement helper: returns -1..1 vector from WASD/arrows/stick
     Vec2 moveAxis(int pad = -1) const;
@@ -127,6 +174,12 @@ private:
     Vec2 mousePos_{}, prevMousePos_{};
     float wheelX_ = 0, wheelY_ = 0;
     std::string textBuf_;
+    std::string composition_;
+    int compositionCursor_ = -1;
+    std::vector<TouchPoint> touches_;
+    bool touchPressLatch_ = false, touchReleaseLatch_ = false;
+    float stickDeadzone_ = 0.18f;
+    float stickCurve_ = 1.0f;
 
     struct Binds {
         std::vector<Key> keys;

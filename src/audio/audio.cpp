@@ -10,6 +10,7 @@
 #include <atomic>
 #include <cstring>
 #include <cmath>
+#include <algorithm>
 
 namespace forge {
 
@@ -32,6 +33,7 @@ struct Voice {
     bool loop = false;
     bool active = false;
     bool isMusic = false;
+    float fade = 1.0f;   // crossfade multiplier (1 = full)
 };
 
 struct AudioEngine::Impl {
@@ -44,6 +46,10 @@ struct AudioEngine::Impl {
     uint32_t deviceChannels = 2;
     uint32_t deviceRate = 48000;
     std::mutex mutex;
+    // Crossfade state, advanced by the mixer (under `mutex`).
+    uint32_t prevMusicVoice = 0;
+    float fadeProgress = 1.0f; // 0..1; 1 = no fade running
+    float fadeSeconds = 0.0f;
     // Bus gains, read by the mixer thread. atomic: the callback runs on a
     // miniaudio-owned thread while API setters run on the game thread.
     // Per-engine (not file-static): two AudioEngines do not share buses.
@@ -56,6 +62,25 @@ static void dataCallback(ma_device* dev, void* out, const void* in, ma_uint32 fr
     int16_t* dst = (int16_t*)out;
     uint32_t ch = im->deviceChannels;
     std::lock_guard<std::mutex> lock(im->mutex);
+
+    // Advance a running crossfade once per block (not per sample).
+    if (im->fadeProgress < 1.0f) {
+        float inc = im->fadeSeconds > 0.0f
+            ? (float)frames / ((float)im->deviceRate * im->fadeSeconds)
+            : 1.0f;
+        im->fadeProgress = std::min(1.0f, im->fadeProgress + inc);
+        if (im->fadeProgress >= 1.0f) {
+            for (auto& v : im->voices)
+                if (v.id == im->prevMusicVoice) v.active = false;
+            im->prevMusicVoice = 0;
+        }
+    }
+    const float fadeIn = im->prevMusicVoice ? im->fadeProgress : 1.0f;
+    const float fadeOut = im->prevMusicVoice ? (1.0f - im->fadeProgress) : 1.0f;
+    for (auto& v : im->voices) {
+        if (!v.active || !v.isMusic) continue;
+        v.fade = (v.id == im->prevMusicVoice) ? fadeOut : fadeIn;
+    }
 
     // ducking gains read without lock by API setters (floats, benign races)
     for (ma_uint32 f = 0; f < frames; ++f) {
@@ -84,7 +109,7 @@ static void dataCallback(ma_device* dev, void* out, const void* in, ma_uint32 fr
 
             float bus = v.isMusic ? im->music.load(std::memory_order_relaxed)
                                   : im->sfx.load(std::memory_order_relaxed);
-            float g = v.volume * bus * im->master.load(std::memory_order_relaxed);
+            float g = v.volume * bus * im->master.load(std::memory_order_relaxed) * v.fade;
             float l = g * (v.pan <= 0 ? 1.0f : 1.0f - v.pan);
             float r = g * (v.pan >= 0 ? 1.0f : 1.0f + v.pan);
             mixL += sl * l; mixR += sr * r;
@@ -247,8 +272,11 @@ void AudioEngine::stop(uint32_t voice) {
 void AudioEngine::stopAll() {
     if (!impl_) return;
     std::lock_guard<std::mutex> lock(impl_->mutex);
-    for (auto& v : impl_->voices) v.active = false;
+    for (auto& v : impl_->voices) { v.active = false; v.fade = 1.0f; }
     musicVoice_ = 0;
+    impl_->prevMusicVoice = 0;
+    impl_->fadeProgress = 1.0f;
+    impl_->fadeSeconds = 0.0f;
 }
 
 void AudioEngine::setVoiceVolume(uint32_t voice, float vol) {
@@ -298,11 +326,57 @@ void AudioEngine::playMusic(SoundHandle h, float volume) {
             if (v.id == musicVoice_) { v.active = false; break; }
         musicVoice_ = 0;
     }
+    if (impl_->prevMusicVoice) { // finish an in-flight fade immediately
+        for (auto& v : impl_->voices)
+            if (v.id == impl_->prevMusicVoice) v.active = false;
+        impl_->prevMusicVoice = 0;
+        impl_->fadeProgress = 1.0f;
+    }
     musicVoice_ = startVoiceLocked(*impl_, h.id, volume, 0, 1.0f, true, true);
 }
 
+void AudioEngine::crossfadeMusic(SoundHandle h, float seconds, float volume) {
+    if (!h.valid()) return;
+    if (seconds <= 0.0f) { playMusic(h, volume); return; }
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    if (impl_->sounds.find(h.id) == impl_->sounds.end()) return;
+
+    // Keep the outgoing voice alive but hand it to the fade slot.
+    if (impl_->prevMusicVoice) {
+        for (auto& v : impl_->voices)
+            if (v.id == impl_->prevMusicVoice) v.active = false;
+        impl_->prevMusicVoice = 0;
+    }
+    impl_->prevMusicVoice = musicVoice_;
+    musicVoice_ = startVoiceLocked(*impl_, h.id, volume, 0, 1.0f, true, true);
+    if (!musicVoice_) { // no free voice: fall back to a hard swap
+        impl_->prevMusicVoice = 0;
+        impl_->fadeProgress = 1.0f;
+        return;
+    }
+    impl_->fadeSeconds = seconds;
+    impl_->fadeProgress = 0.0f;
+    if (impl_->prevMusicVoice == 0) impl_->fadeProgress = 1.0f; // nothing to fade
+}
+
 void AudioEngine::stopMusic() {
-    if (musicVoice_) { stop(musicVoice_); musicVoice_ = 0; }
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    if (musicVoice_) {
+        for (auto& v : impl_->voices)
+            if (v.id == musicVoice_) { v.active = false; break; }
+        musicVoice_ = 0;
+    }
+    if (impl_->prevMusicVoice) {
+        for (auto& v : impl_->voices)
+            if (v.id == impl_->prevMusicVoice) { v.active = false; break; }
+        impl_->prevMusicVoice = 0;
+    }
+    impl_->fadeProgress = 1.0f;
+}
+
+float AudioEngine::musicFadeProgress() const {
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    return impl_->fadeProgress;
 }
 
 int AudioEngine::voiceCount() const {

@@ -27,7 +27,16 @@ public:
     void logf(LogLevel l, const char* file, int line, const char* fmt, Args... args) {
         if (!enabled(l)) return;
         char buf[2048];
+        // Every call site passes a literal; clang's -Wformat-security cannot
+        // see through the variadic parameter here.
+#if defined(__clang__)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wformat-security"
+#endif
         std::snprintf(buf, sizeof(buf), fmt, args...);
+#if defined(__clang__)
+#pragma clang diagnostic pop
+#endif
         log(l, file, line, std::string(buf));
     }
 

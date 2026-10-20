@@ -17,6 +17,14 @@
 #include "forge/graphics/camera.hpp"
 #include "forge/core/input.hpp"
 #include "forge/audio/audio.hpp"
+#include "forge/graphics/atlas.hpp"
+#include "forge/graphics/skeleton.hpp"
+#include "forge/graphics/font.hpp"
+#include "forge/graphics/lighting.hpp"
+#include "forge/utils/json.hpp"
+#include "forge/script/script.hpp"
+#include "forge/scene/serialization.hpp"
+#include "forge/assets/assets.hpp"
 
 static int failures = 0;
 #define CHECK(cond) do { \
@@ -398,6 +406,208 @@ static void testPhysicsSolver() {
     std::printf("physics-solver ok\n");
 }
 
+static void testPhysicsFeatures() {
+    // --- layer/mask filtering: a filtered pair never touches ---
+    {
+        PhysicsWorld w;
+        w.setGravity({0, -1000});
+        Body floor;
+        floor.type = BodyType::Static;
+        floor.pos = {0, -50}; floor.size = {400, 100};
+        floor.layer = 0x2; floor.mask = 0x2;      // "world" layer only
+        w.addBody(floor);
+        Body ghost;
+        ghost.type = BodyType::Dynamic;
+        ghost.pos = {0, 120}; ghost.size = {20, 20};
+        ghost.layer = 0x1; ghost.mask = 0x1;      // "player" layer only
+        uint32_t gid = w.addBody(ghost);
+        for (int i = 0; i < 120; ++i) w.step(1.0f / 60.0f);
+        CHECK(w.get(gid)->pos.y < -200.0f);       // fell straight through
+    }
+    // ...and matching masks do collide.
+    {
+        PhysicsWorld w;
+        w.setGravity({0, -1000});
+        Body floor;
+        floor.type = BodyType::Static;
+        floor.pos = {0, -50}; floor.size = {400, 100};
+        floor.layer = 0x2; floor.mask = 0x1 | 0x2;
+        w.addBody(floor);
+        Body player;
+        player.type = BodyType::Dynamic;
+        player.pos = {0, 120}; player.size = {20, 20};
+        player.layer = 0x1; player.mask = 0x2;
+        uint32_t pid = w.addBody(player);
+        for (int i = 0; i < 180; ++i) w.step(1.0f / 60.0f);
+        CHECK_CLOSE(w.get(pid)->pos.y, 10.0f, 2.0f);
+        CHECK(w.get(pid)->onGround);
+    }
+
+    // --- one-way platform: lands from above, passes through from below ---
+    {
+        PhysicsWorld w;
+        w.setGravity({0, -1000});
+        Body plat;
+        plat.type = BodyType::Static;
+        plat.pos = {0, 100}; plat.size = {200, 16};
+        plat.oneWay = true;
+        w.addBody(plat);
+        Body fromAbove;
+        fromAbove.type = BodyType::Dynamic;
+        fromAbove.pos = {0, 200}; fromAbove.size = {20, 20};
+        uint32_t aid = w.addBody(fromAbove);
+        for (int i = 0; i < 180; ++i) w.step(1.0f / 60.0f);
+        CHECK(w.get(aid)->pos.y > 100.0f);        // resting on the platform
+
+        PhysicsWorld w2;
+        w2.setGravity({0, 0});
+        Body plat2;
+        plat2.type = BodyType::Static;
+        plat2.pos = {0, 100}; plat2.size = {200, 16};
+        plat2.oneWay = true;
+        w2.addBody(plat2);
+        Body jumper;
+        jumper.type = BodyType::Dynamic;
+        jumper.pos = {0, 40}; jumper.size = {20, 20};
+        jumper.vel = {0, 400};
+        uint32_t jid = w2.addBody(jumper);
+        for (int i = 0; i < 60; ++i) w2.step(1.0f / 60.0f);
+        CHECK(w2.get(jid)->pos.y > 200.0f);       // went up through it
+    }
+
+    // --- trigger enter/exit on sensors ---
+    {
+        PhysicsWorld w;
+        w.setGravity({0, 0});
+        int enters = 0, exits = 0;
+        w.onTriggerEnter([&](const Contact& c) { CHECK(c.sensor); ++enters; });
+        w.onTriggerExit([&](const Contact& c) { CHECK(c.sensor); ++exits; });
+        Body sensor;
+        sensor.type = BodyType::Static;
+        sensor.sensor = true;
+        sensor.pos = {0, 0}; sensor.size = {60, 60};
+        w.addBody(sensor);
+        Body mover;
+        mover.type = BodyType::Kinematic;
+        mover.pos = {-200, 0}; mover.size = {20, 20};
+        mover.vel = {200, 0};
+        w.addBody(mover);
+        for (int i = 0; i < 180; ++i) w.step(1.0f / 60.0f);
+        CHECK(enters == 1);
+        CHECK(exits == 1);
+    }
+
+    // --- circle collider rests on the floor at its radius ---
+    {
+        PhysicsWorld w;
+        w.setGravity({0, -1000});
+        Body floor;
+        floor.type = BodyType::Static;
+        floor.pos = {0, -50}; floor.size = {400, 100};
+        w.addBody(floor);
+        Body ball;
+        ball.type = BodyType::Dynamic;
+        ball.shape = ShapeType::Circle;
+        ball.radius = 12.0f;
+        ball.pos = {0, 120};
+        uint32_t bid = w.addBody(ball);
+        for (int i = 0; i < 240; ++i) w.step(1.0f / 60.0f);
+        CHECK_CLOSE(w.get(bid)->pos.y, 12.0f, 2.5f);
+        CHECK(w.get(bid)->onGround);
+        CHECK_CLOSE(w.get(bid)->bounds().w, 24.0f, 1e-4f);
+    }
+
+    // --- moving-platform carry: a rider inherits the platform's delta ---
+    {
+        PhysicsWorld w;
+        w.setGravity({0, -1000});
+        Body plat;
+        plat.type = BodyType::Kinematic;
+        plat.pos = {0, 0}; plat.size = {200, 16};
+        plat.vel = {60, 0};
+        uint32_t platId = w.addBody(plat);
+        Body rider;
+        rider.type = BodyType::Dynamic;
+        rider.pos = {0, 40}; rider.size = {20, 20};
+        uint32_t riderId = w.addBody(rider);
+        for (int i = 0; i < 60; ++i) w.step(1.0f / 60.0f);
+        const Body* r = w.get(riderId);
+        const Body* p = w.get(platId);
+        float lag = p->pos.x - r->pos.x;   // after landing + carry settles
+        for (int i = 0; i < 60; ++i) w.step(1.0f / 60.0f);
+        r = w.get(riderId);
+        p = w.get(platId);
+        CHECK(r->onGround);
+        // The rider must not be left behind: the offset stays constant while
+        // the platform keeps moving (it inherited every delta).
+        CHECK_CLOSE(p->pos.x - r->pos.x, lag, 1.0f);
+        CHECK_CLOSE(r->pos.x, p->pos.x, 20.0f);
+        CHECK_CLOSE(r->pos.y, p->size.y * 0.5f + r->size.y * 0.5f, 2.0f);
+    }
+
+    // --- distance joint holds two bodies at their rest length ---
+    {
+        PhysicsWorld w;
+        w.setGravity({0, 0});
+        Body a;
+        a.type = BodyType::Dynamic; a.pos = {0, 0}; a.size = {10, 10};
+        Body b;
+        b.type = BodyType::Dynamic; b.pos = {100, 0}; b.size = {10, 10};
+        uint32_t ia = w.addBody(a), ib = w.addBody(b);
+        Joint j;
+        j.type = JointType::Distance;
+        j.a = ia; j.b = ib;
+        j.restLength = 50.0f;
+        j.stiffness = 1.0f;
+        uint32_t jid = w.addJoint(j);
+        CHECK(jid != 0);
+        CHECK(w.jointCount() == 1);
+        for (int i = 0; i < 120; ++i) w.step(1.0f / 60.0f);
+        float dist = (w.get(ib)->pos - w.get(ia)->pos).length();
+        CHECK_CLOSE(dist, 50.0f, 8.0f);
+        w.removeJoint(jid);
+        CHECK(w.jointCount() == 0);
+    }
+
+    // --- CCD: speed-derived substeps stop a fast body at a thin wall ---
+    // The substep count is capped at 16, so the test speed is chosen to be
+    // within that budget (a 6000 px/s 4 px bullet needs ~100 substeps and is
+    // documented to tunnel — that is the accepted arcade trade-off).
+    {
+        PhysicsWorld w;
+        w.setGravity({0, 0});
+        Body wall;
+        wall.type = BodyType::Static;
+        wall.pos = {0, 0}; wall.size = {4, 400};
+        w.addBody(wall);
+        Body bullet;
+        bullet.type = BodyType::Dynamic;
+        bullet.pos = {-100, 0}; bullet.size = {4, 4};
+        bullet.vel = {900, 0};
+        uint32_t bid = w.addBody(bullet);
+        for (int i = 0; i < 20; ++i) w.step(1.0f / 60.0f);
+        CHECK(w.get(bid)->pos.x < 0.0f);          // stopped before the wall
+        CHECK(w.continuous());
+
+        // The substep count grows with speed; a body slower than the CCD
+        // budget is stopped, and the cap is the documented failure mode.
+        PhysicsWorld slow;
+        slow.setGravity({0, 0});
+        Body wall2;
+        wall2.type = BodyType::Static;
+        wall2.pos = {0, 0}; wall2.size = {4, 400};
+        slow.addBody(wall2);
+        Body pebble;
+        pebble.type = BodyType::Dynamic;
+        pebble.pos = {-100, 0}; pebble.size = {4, 4};
+        pebble.vel = {200, 0};
+        uint32_t pid = slow.addBody(pebble);
+        for (int i = 0; i < 40; ++i) slow.step(1.0f / 60.0f);
+        CHECK(slow.get(pid)->pos.x < 0.0f);
+    }
+    std::printf("physics-features ok\n");
+}
+
 static void testScenePhysics() {
     // Collider is wired: a dynamic crate must land on a static floor.
     Scene scene;
@@ -630,6 +840,34 @@ static void testTilemap() {
         CHECK(mi.solidsInRect({0, 0, 16, 16}).size() == 1);
         std::filesystem::remove(p);
     }
+    // --- slopes ---
+    {
+        Tilemap sm;
+        sm.create(2, 1, 16, 16);
+        sm.setTile(0, 0, 0, 7);
+        sm.setSolid(7, true);
+        sm.setSlope(7, 0.0f, 1.0f); // 45 degrees, low on the left
+        CHECK(sm.isSlope(7));
+        CHECK(sm.isSolid(7)); // setSlope implies solid
+        CHECK_CLOSE(sm.slope(7).left, 0.0f, 1e-6f);
+        CHECK_CLOSE(sm.slope(7).right, 1.0f, 1e-6f);
+        CHECK_CLOSE(sm.slopeSurfaceHeight(7, 0.0f), 0.0f, 1e-5f);
+        CHECK_CLOSE(sm.slopeSurfaceHeight(7, 0.5f), 8.0f, 1e-5f);
+        CHECK_CLOSE(sm.slopeSurfaceHeight(7, 1.0f), 16.0f, 1e-5f);
+        CHECK_CLOSE(sm.surfaceYAt(0, 0, 0, 8.0f), 8.0f, 1e-5f);
+        // A box at the left edge rests on the low part of the ramp; the same
+        // box on the right is pushed up further by the higher surface.
+        Rect left{2, 4, 8, 8};
+        Vec2 push;
+        CHECK(sm.collideRect(left, &push));
+        // collideRect takes the rect by value; callers apply `push` themselves.
+        CHECK_CLOSE(push.y, 2.0f, 0.01f); // surface y=6, box bottom was 4
+        Rect right{10, 4, 4, 4};
+        CHECK(sm.collideRect(right, &push));
+        CHECK(push.y > 2.0f);
+        sm.clearSlope(7);
+        CHECK(!sm.isSlope(7));
+    }
     std::printf("tilemap ok\n");
 }
 
@@ -679,6 +917,136 @@ static void testTilemapJson() {
     }
     std::filesystem::remove(tmp);
     std::filesystem::remove(bad);
+
+    // --- multi-tileset, flip flags, object layers, parallax ---
+    {
+        std::filesystem::path p =
+            std::filesystem::temp_directory_path() / "forge_test_multi.json";
+        { std::ofstream f(p); f << R"JSON({
+            "width": 3, "height": 2, "tilewidth": 16, "tileheight": 16,
+            "tilesets": [
+                {"firstgid": 1, "image": "a.png", "columns": 4, "tilecount": 8},
+                {"firstgid": 101, "image": "b.png", "columns": 2, "tilecount": 4}
+            ],
+            "layers": [
+                {"type": "tilelayer", "name": "bg", "width": 3, "height": 2,
+                 "offsetx": 4, "offsety": -2, "parallaxx": 0.5, "parallaxy": 0.25,
+                 "data": [1, 0, 0, 0, 0, 0]},
+                {"type": "tilelayer", "name": "fg", "width": 3, "height": 2,
+                 "visible": false, "opacity": 0.5,
+                 "data": [0, 0, 0, 0, 2147483753, 0]},
+                {"type": "objectgroup", "name": "spawns", "objects": [
+                    {"name": "start", "type": "spawn", "x": 16, "y": 0,
+                     "width": 16, "height": 16},
+                    {"name": "goal", "type": "spawn", "x": 32, "y": 16, "point": true}
+                ]}
+            ]
+        })JSON"; }
+        Tilemap mm;
+        CHECK(mm.loadTiledJson(p.string()));
+        CHECK(mm.width() == 3 && mm.height() == 2);
+        CHECK(mm.tilesets().size() == 2);
+        CHECK(mm.layerCount() == 2);
+        // Tiled's first data row is the top row -> Y-up y = height-1.
+        CHECK(mm.tile(0, 0, 1) == 1);
+        CHECK(mm.tilesetIndex(0, 0, 1) == 0);
+        CHECK_CLOSE(mm.layer(0).offset.x, 4.0f, 1e-6f);
+        CHECK_CLOSE(mm.layer(0).parallax.x, 0.5f, 1e-6f);
+        CHECK(mm.layer(1).visible == false);
+        CHECK_CLOSE(mm.layer(1).opacity, 0.5f, 1e-6f);
+        // 0x80000069 = flipH + gid 105 (firstgid 101 -> local 5).
+        CHECK(mm.tile(1, 1, 0) == 5);
+        CHECK(mm.tilesetIndex(1, 1, 0) == 1);
+        CHECK(mm.tileFlags(1, 1, 0) == 1);
+        // Objects: top-down y converted to Y-up (map is 32 px tall).
+        CHECK(mm.objects().size() == 2);
+        CHECK(mm.objects()[0].name == "start");
+        CHECK(mm.objects()[0].type == "spawn");
+        CHECK_CLOSE(mm.objects()[0].rect.x, 16.0f, 1e-5f);
+        CHECK_CLOSE(mm.objects()[0].rect.y, 16.0f, 1e-5f); // 32 - (0 + 16)
+        CHECK(mm.objects()[1].point);
+        // Solids are per-id across tilesets.
+        mm.setSolid(5, true);
+        CHECK(mm.solidsInRect({16, 16, 16, 16}).size() == 1);
+        std::filesystem::remove(p);
+    }
+
+    // --- infinite map chunks + origin offset ---
+    {
+        std::filesystem::path p =
+            std::filesystem::temp_directory_path() / "forge_test_infinite.json";
+        { std::ofstream f(p); f << R"JSON({
+            "infinite": true, "width": 0, "height": 0,
+            "tilewidth": 16, "tileheight": 16,
+            "tilesets": [{"firstgid": 1, "image": "a.png", "columns": 1, "tilecount": 1}],
+            "layers": [{"type": "tilelayer", "name": "g", "width": 0, "height": 0,
+                "chunks": [
+                    {"x": -16, "y": 0, "width": 16, "height": 16,
+                     "data": [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,
+                              0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+                              0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+                              0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+                              0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+                              0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+                              0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+                              0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+                              0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+                              0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+                              0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+                              0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+                              0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+                              0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+                              0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+                              0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]},
+                    {"x": 0, "y": 0, "width": 16, "height": 16,
+                     "data": [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+                              0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+                              0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+                              0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+                              0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+                              0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+                              0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+                              0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+                              0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+                              0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+                              0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+                              0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+                              0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+                              0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+                              0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+                              0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1]}
+                ]}]
+        })JSON"; }
+        Tilemap im;
+        CHECK(im.loadTiledJson(p.string()));
+        // Two 16-wide chunks, Tiled y 0..15 -> 16 rows, 32 columns.
+        CHECK(im.width() == 32 && im.height() == 16);
+        CHECK_CLOSE(im.originOffset().x, -16.0f * 16.0f, 1e-4f);
+        // Tiled chunk row 0 is the top row -> Y-up row 15.
+        CHECK(im.tile(0, 15, 15) == 1);
+        // Second chunk's last data row is Tiled's bottom row (y=15) -> dy 0;
+        // its last column lands at dx 31, world x = -256 + 31*16 = 240.
+        CHECK(im.tile(0, 31, 0) == 1);
+        im.setSolid(1, true);
+        CHECK(im.solidsInRect({240.0f, 0.0f, 16.0f, 16.0f}).size() == 1);
+        std::filesystem::remove(p);
+    }
+
+    // --- autotile ---
+    {
+        Tilemap am;
+        am.create(3, 3, 16, 16);
+        for (int y = 0; y < 3; ++y)
+            for (int x = 0; x < 3; ++x) am.setTile(0, x, y, 1);
+        auto rule = Tilemap::buildAutoRule(1, 2, 3, 4);
+        CHECK(rule.size() == 256);
+        CHECK(rule[0] == 1);          // isolated -> base
+        CHECK(rule[0xFF] == 4);       // full ring -> inner
+        am.setAutoRule(rule);
+        am.applyAutotile(0);
+        CHECK(am.tile(0, 1, 1) == 4); // center is surrounded
+        CHECK(am.tile(0, 0, 0) == 2 || am.tile(0, 0, 0) == 3);
+    }
     std::printf("tilemap-json ok\n");
 }
 
@@ -849,6 +1217,430 @@ static void testScene() {
     std::printf("scene ok\n");
 }
 
+static void testJson() {
+    // Round-trip: ordered objects, escapes, nested arrays, UTF-16 escapes.
+    const char* src = R"({"b":1,"a":[true,false,null,"x\ny"],"u":"\u00e9\ud83d\ude00"})";
+    json::ParseError err;
+    json::Value v = json::parse(src, &err);
+    CHECK(err.ok());
+    CHECK(v.isObject());
+    CHECK(v.size() == 3);
+    CHECK(v.items()[0].first == "b"); // insertion order preserved
+    CHECK(v["a"].isArray() && v["a"].size() == 4);
+    CHECK(v["a"].at(0).asBool());
+    CHECK(v["a"].at(1).isBool() && !v["a"].at(1).asBool());
+    CHECK(v["a"].at(2).isNull());
+    CHECK(v["a"].at(3).asString() == "x\ny");
+    // U+00E9 + U+1F600
+    CHECK(v["u"].asString() == "\xC3\xA9\xF0\x9F\x98\x80");
+
+    std::string out = json::write(v, true);
+    json::Value again = json::parse(out, &err);
+    CHECK(err.ok());
+    CHECK(again["b"].asInt() == 1);
+    CHECK(again["u"].asString() == v["u"].asString());
+
+    // Error reporting carries a line.
+    json::Value bad = json::parse("{\n  \"a\": }", &err);
+    CHECK(!err.ok());
+    CHECK(err.line == 2);
+    CHECK(bad.isNull());
+
+    // Non-finite numbers are written as 0 (valid JSON).
+    json::Value n = json::Value::array();
+    n.push(json::Value(std::nan("")));
+    CHECK(json::write(n) == "[0]");
+    std::printf("json ok\n");
+}
+
+static void testScript() {
+    using namespace forge::script;
+    ScriptVM vm;
+    std::string printed;
+    vm.printTo([&](const std::string& s) { printed += s; });
+
+    CHECK(vm.loadSource(
+        "var total = 0;\n"
+        "fn add(a, b) { total = total + a + b; return total; }\n"
+        "fn fib(n) { if (n < 2) { return n; } return fib(n - 1) + fib(n - 2); }\n"
+        "fn loop() { var i = 0; var s = 0; while (i < 10) { s = s + i; i = i + 1; } return s; }\n"
+        "fn logic(a, b) { return (a > 1 && b < 5) || a == 0; }\n"
+        "fn text() { return \"a\" + 1 + \"b\"; }\n",
+        "test.fgs"));
+    CHECK(vm.error().ok());
+
+    CHECK(vm.call("add", args(2.0, 3.0)).number() == 5.0);
+    CHECK(vm.call("add", args(1.0, 1.0)).number() == 7.0);
+    CHECK(vm.call("fib", args(10)).number() == 55.0);
+    CHECK(vm.call("loop").number() == 45.0);
+    CHECK(vm.call("logic", args(2.0, 1.0)).boolean());
+    CHECK(!vm.call("logic", args(1.0, 9.0)).boolean());
+    CHECK(vm.call("text").string() == "a1b");
+
+    // Globals are visible to scripts and written back through tables.
+    vm.setGlobal("speed", 4.0);
+    CHECK(vm.loadSource("fn bump() { speed = speed * 2; return speed; }", "globals"));
+    CHECK(vm.call("bump").number() == 8.0);
+    CHECK(vm.getGlobal("speed").number() == 8.0);
+
+    Value self = Value::table();
+    self.set("x", 10.0);
+    vm.setGlobal("self", self);
+    CHECK(vm.loadSource("fn move(dx) { self.x = self.x + dx; return self.x; }", "member"));
+    CHECK(vm.call("move", args(5.0)).number() == 15.0);
+    CHECK(vm.getGlobal("self").get("x").number() == 15.0);
+
+    // Host bindings.
+    int spawned = 0;
+    vm.bind("spawn", [&](const std::vector<Value>& a) {
+        spawned += (int)a.size();
+        return Value(true);
+    });
+    CHECK(vm.loadSource("fn go() { return spawn(1, 2, 3); }", "host"));
+    CHECK(vm.call("go").boolean());
+    CHECK(spawned == 3);
+
+    // Errors are reported, never thrown, and the VM stays usable.
+    CHECK(!vm.loadSource("fn bad() { return 1 + ; }", "parse"));
+    CHECK(!vm.error().ok());
+    CHECK(!vm.loadSource("fn x() { return 1; }\nfn x() {", "parse2"));
+    CHECK(!vm.error().ok());
+    CHECK(vm.loadSource("fn boom() { return 1 / 0; }", "runtime"));
+    CHECK(vm.error().ok());
+    vm.call("boom");
+    CHECK(!vm.error().ok());
+    CHECK(vm.error().message.find("zero") != std::string::npos);
+    // Missing function.
+    vm.call("nope");
+    CHECK(!vm.error().ok());
+    // Step budget stops infinite loops.
+    CHECK(vm.loadSource("fn spin() { while (true) { } return 0; }", "spin"));
+    vm.setStepBudget(1000);
+    vm.call("spin");
+    CHECK(!vm.error().ok());
+    CHECK(vm.error().message.find("budget") != std::string::npos);
+    vm.setStepBudget(1000000);
+
+    // Functions list + hasFunction.
+    CHECK(vm.hasFunction("spin"));
+    CHECK(!vm.functions().empty());
+    std::printf("script ok\n");
+}
+
+static void testAtlas() {
+    AtlasPacker packer(128, 128, 2);
+    int a = packer.add(64, 32, "a");
+    int b = packer.add(32, 32, "b");
+    int c = packer.add(32, 64, "c");
+    CHECK(a == 0 && b == 1 && c == 2);
+    CHECK(packer.pack());
+    CHECK(packer.count() == 3);
+    CHECK(packer.indexOf("b") == 1);
+    CHECK(packer.name(0) == "a");
+    CHECK(packer.rect(0).w == 64 && packer.rect(0).h == 32);
+    CHECK(packer.occupancy() > 0.0f && packer.occupancy() <= 1.0f);
+    CHECK(packer.pixels().size() == 128u * 128u * 4u);
+    // No overlap between packed rects.
+    for (int i = 0; i < 3; ++i)
+        for (int j = i + 1; j < 3; ++j)
+            CHECK(!packer.rect(i).overlaps(packer.rect(j)));
+
+    // A too-large entry is rejected outright (add returns -1)...
+    AtlasPacker small(64, 64);
+    CHECK(small.add(128, 16) == -1);
+    // ...and a layout that cannot fit every entry makes pack() fail rather
+    // than overlapping.
+    CHECK(small.add(48, 48) >= 0);
+    CHECK(small.add(48, 48) >= 0);
+    CHECK(!small.pack());
+
+    // blit copies an RGBA source into the slot.
+    std::vector<uint8_t> src(4u * 4u * 4u, 200);
+    CHECK(packer.blit(0, src.data(), 4, 4));
+    Rect r = packer.rect(0);
+    size_t off = ((size_t)r.y * 128 + (size_t)r.x) * 4;
+    CHECK(packer.pixels()[off] == 200);
+    std::printf("atlas ok\n");
+}
+
+static void testAssetResolve() {
+    namespace fs = std::filesystem;
+    fs::path dir = fs::temp_directory_path() / "forge_test_assets";
+    fs::remove_all(dir);
+    fs::create_directories(dir / "assets");
+    { std::ofstream f(dir / "assets" / "hero.png"); f << "not a png"; }
+
+    AssetManager assets;
+    CHECK(assets.searchPaths().empty());
+    // No search path: an existing relative path resolves to itself.
+    fs::path cwd = fs::current_path();
+    fs::current_path(dir);
+    CHECK(assets.resolve("assets/hero.png") == "assets/hero.png");
+    // A path that only exists under the search dir resolves there.
+    assets.addSearchPath("assets/");
+    CHECK(assets.resolve("hero.png") == "assets/hero.png");
+    CHECK(assets.searchPaths().size() == 1);
+    // Unknown paths fall through unchanged (the loader then reports the error).
+    CHECK(assets.resolve("missing.png") == "missing.png");
+    // Absolute paths bypass the search list.
+    std::string abs = (dir / "assets" / "hero.png").string();
+    CHECK(assets.resolve(abs) == abs);
+    // An empty path stays empty (no accidental directory lookup).
+    CHECK(assets.resolve("").empty());
+    assets.clearSearchPaths();
+    CHECK(assets.searchPaths().empty());
+    fs::current_path(cwd);
+
+    // A missing shader reports failure instead of throwing (no GL needed:
+    // the file check happens before compile).
+    CHECK(assets.loadShader("nope.vert", "nope.frag") == nullptr);
+
+    fs::remove_all(dir);
+    std::printf("asset-resolve ok\n");
+}
+
+static void testLightingBookkeeping() {
+    // Headless (no GL): exercises the light list and the flicker contract.
+    // Flicker is applied at draw time, so `update()` must never mutate the
+    // authored intensity (the old code compounded it every frame).
+    LightingSystem lights;
+    Light2D torch;
+    torch.pos = {10, 20};
+    torch.radius = 150.0f;
+    torch.intensity = 1.5f;
+    torch.flickerAmount = 0.2f;
+    torch.flickerSpeed = 5.0f;
+    torch.flickerPhase = 0.3f;
+    int idx = lights.addLight(torch);
+    CHECK(lights.lightCount() == 1);
+    CHECK(lights.light(idx) != nullptr);
+    for (int i = 0; i < 600; ++i) lights.update(1.0f / 60.0f);
+    CHECK_CLOSE(lights.light(idx)->intensity, 1.5f, 1e-5f);
+    CHECK_CLOSE(lights.light(idx)->pos.x, 10.0f, 1e-5f);
+    CHECK(lights.light(-1) == nullptr);
+    CHECK(lights.light(1) == nullptr);
+    lights.clearLights();
+    CHECK(lights.lightCount() == 0);
+    std::printf("lighting ok\n");
+}
+
+static void testSkeleton() {
+    // Parse a two-bone skeleton with one rotation track, then sample it.
+    const char* json = R"JSON({
+        "bones": [
+            {"name": "root", "x": 0, "y": 0, "length": 10},
+            {"name": "arm", "parent": "root", "x": 20, "y": 0, "rotation": 0,
+             "length": 20}
+        ],
+        "slots": [
+            {"name": "body", "bone": "root", "texture": "body", "width": 32,
+             "height": 32, "order": 0},
+            {"name": "hand", "bone": "arm", "texture": "hand", "width": 8,
+             "height": 8, "offsetX": 20, "order": 1}
+        ],
+        "animations": [
+            {"name": "wave", "duration": 1.0, "loop": true, "tracks": [
+                {"bone": "arm", "type": "rotation", "keys": [
+                    {"time": 0.0, "x": 0.0},
+                    {"time": 0.5, "x": 1.0},
+                    {"time": 1.0, "x": 0.0}
+                ]}
+            ]}
+        ]
+    })JSON";
+    Skeleton sk;
+    CHECK(sk.parseJson(json, "test"));
+    CHECK(sk.valid());
+    CHECK(sk.boneCount() == 2);
+    CHECK(sk.slotCount() == 2);
+    CHECK(sk.findBone("arm") == 1);
+    CHECK(sk.findSlot("hand") == 1);
+    CHECK(sk.animationCount() == 1);
+    CHECK(sk.play("wave"));
+    CHECK(sk.playing());
+    CHECK(sk.currentAnimation() == "wave");
+
+    sk.update(0.5f);
+    CHECK_CLOSE(sk.time(), 0.5f, 1e-5f);
+    CHECK_CLOSE(sk.bone(1)->worldRotation, 1.0f, 1e-4f);
+    CHECK_CLOSE(sk.bone(1)->worldPos.x, 20.0f, 1e-4f);
+
+    // Loops back to the start of the clip.
+    sk.update(0.6f);
+    CHECK_CLOSE(sk.time(), 0.1f, 1e-4f);
+    CHECK_CLOSE(sk.bone(1)->worldRotation, 0.2f, 1e-4f);
+
+    // Unknown clip names are ignored, not fatal.
+    CHECK(!sk.play("nope"));
+    CHECK(sk.currentAnimation() == "wave");
+    // stop() drops back to the rest pose.
+    sk.stop();
+    sk.applyPose();
+    CHECK_CLOSE(sk.bone(1)->worldRotation, 0.0f, 1e-5f);
+
+    // Malformed JSON fails cleanly.
+    Skeleton bad;
+    CHECK(!bad.parseJson("{ not json", "bad"));
+    CHECK(!bad.valid());
+    std::printf("skeleton ok\n");
+}
+
+static void testSerialization() {
+    namespace fs = std::filesystem;
+    fs::path dir = fs::temp_directory_path() / "forge-test-serialization";
+    fs::create_directories(dir);
+    std::string scenePath = (dir / "scene.json").string();
+    std::string prefabPath = (dir / "prefab.json").string();
+
+    Scene scene;
+    Entity hero = scene.create("hero");
+    scene.registry().get<Transform>(hero).pos = {12, 34};
+    scene.registry().get<Transform>(hero).rotation = 0.5f;
+    Sprite sp;
+    sp.src = {0, 0, 16, 16};
+    sp.color = {1, 0, 0, 1};
+    sp.layer = 3;
+    scene.registry().emplace<Sprite>(hero, sp);
+    scene.registry().emplace<Velocity>(hero, Velocity{{1, 2}, {0, 0}, 0.1f, 100});
+    Collider col;
+    col.halfExtents = {8, 8};
+    col.sensor = true;
+    scene.registry().emplace<Collider>(hero, col);
+
+    Entity prop = scene.create("prop");
+    scene.registry().get<Transform>(prop).pos = {-5, 0};
+
+    CHECK(saveScene(scene, scenePath));
+    Scene loaded;
+    SceneSaveStats stats;
+    CHECK(loadScene(loaded, scenePath, nullptr, &stats));
+    CHECK(stats.entities == 2);
+    CHECK(stats.sprites == 1);
+    CHECK(stats.colliders == 1);
+    Entity h2 = loaded.findByTag("hero");
+    CHECK(h2 != kNullEntity);
+    CHECK_CLOSE(loaded.registry().get<Transform>(h2).pos.x, 12.0f, 1e-4f);
+    CHECK_CLOSE(loaded.registry().get<Transform>(h2).rotation, 0.5f, 1e-4f);
+    CHECK(loaded.registry().has<Sprite>(h2));
+    CHECK(loaded.registry().get<Sprite>(h2).layer == 3);
+    CHECK(loaded.registry().get<Collider>(h2).sensor);
+    CHECK_CLOSE(loaded.registry().get<Velocity>(h2).maxSpeed, 100.0f, 1e-4f);
+
+    // Prefabs round-trip and instantiate at an overridden position.
+    Prefab prefab = makePrefab(scene, hero, "hero_prefab");
+    CHECK(prefab.valid());
+    CHECK(savePrefab(prefab, prefabPath));
+    Prefab loadedPrefab;
+    CHECK(loadPrefab(loadedPrefab, prefabPath));
+    CHECK(loadedPrefab.name == "hero_prefab");
+    Scene target;
+    Entity inst = instantiate(target, loadedPrefab, {100, 200}, nullptr);
+    CHECK(inst != kNullEntity);
+    CHECK_CLOSE(target.registry().get<Transform>(inst).pos.x, 100.0f, 1e-4f);
+    CHECK_CLOSE(target.registry().get<Transform>(inst).pos.y, 200.0f, 1e-4f);
+    CHECK(target.registry().has<Sprite>(inst));
+
+    // Bad files are rejected without throwing.
+    Scene bad;
+    CHECK(!loadScene(bad, (dir / "missing.json").string()));
+    std::FILE* f = std::fopen((dir / "bad.json").string().c_str(), "wb");
+    if (f) { std::fputs("{\"format\":\"nope\"}", f); std::fclose(f); }
+    CHECK(!loadScene(bad, (dir / "bad.json").string()));
+
+    fs::remove_all(dir);
+    std::printf("serialization ok\n");
+}
+
+static void testFontUtf8() {
+    // Decode: ASCII, 2/3/4-byte sequences, invalid byte -> U+FFFD.
+    auto cps = Font::decodeUtf8("A\xC3\xA9\xE2\x82\xAC\xF0\x9F\x98\x80");
+    CHECK(cps.size() == 4);
+    CHECK(cps[0] == 'A');
+    CHECK(cps[1] == 0xE9);
+    CHECK(cps[2] == 0x20AC);
+    CHECK(cps[3] == 0x1F600);
+    auto bad = Font::decodeUtf8("a\xFF" "b");
+    CHECK(bad.size() == 3 && bad[1] == 0xFFFD);
+    // Round-trip.
+    std::string enc;
+    for (uint32_t cp : cps) Font::encodeUtf8(cp, enc);
+    CHECK(enc == "A\xC3\xA9\xE2\x82\xAC\xF0\x9F\x98\x80");
+    // Empty input.
+    CHECK(Font::decodeUtf8("").empty());
+    std::printf("font-utf8 ok\n");
+}
+
+static void testInputDepth() {
+    Input in;
+    // Touch lifecycle.
+    in.touchDown(1, {10, 20}, 0.5f);
+    in.touchDown(2, {30, 40});
+    CHECK(in.touchActive());
+    CHECK(in.touches().size() == 2);
+    CHECK(in.touchPressed());
+    CHECK(in.touch(2) != nullptr);
+    CHECK_CLOSE(in.touch(2)->pos.x, 30.0f, 1e-5f);
+    in.touchMove(1, {15, 25}, 0.9f);
+    CHECK_CLOSE(in.touchDrag(1).x, 5.0f, 1e-5f);
+    CHECK_CLOSE(in.touch(1)->pressure, 0.9f, 1e-5f);
+    in.touchUp(1);
+    CHECK(in.touches().size() == 1);
+    CHECK(in.touchReleased());
+    in.touchCancel(2);
+    CHECK(!in.touchActive());
+    CHECK(in.touch(1) == nullptr);
+    in.endFrame();
+    CHECK(!in.touchPressed());
+
+    // IME composition state.
+    in.setComposition("\xE3\x81\x82", 3);
+    CHECK(in.composing());
+    CHECK(in.compositionCursor() == 3);
+    in.endFrame();
+    CHECK(!in.composing());
+
+    // Action remap round-trip through the text format and a file.
+    in.bindKey("jump", Key::Space);
+    in.bindKey("jump", Key::Z);
+    in.bindMouse("jump", MouseButton::Left);
+    in.bindPad("jump", GamepadButton::A);
+    in.bindKey("left", Key::A);
+    std::string text = in.serializeBinds();
+    CHECK(text.find("jump=") != std::string::npos);
+    CHECK(text.find("mouse:left") != std::string::npos);
+    CHECK(text.find("pad:a") != std::string::npos);
+
+    Input remapped;
+    std::string err;
+    CHECK(remapped.deserializeBinds(text, &err));
+    CHECK(err.empty());
+    remapped.setKey(Key::Space, true);
+    CHECK(remapped.actionDown("jump"));
+    CHECK(remapped.actionPressed("jump"));
+    remapped.setKey(Key::Space, false);
+    CHECK(remapped.actionReleased("jump"));
+
+    // Unknown tokens are rejected with a line number.
+    Input bad;
+    CHECK(!bad.deserializeBinds("jump=notakey\n", &err));
+    CHECK(err.find("line 1") != std::string::npos);
+
+    namespace fs = std::filesystem;
+    fs::path path = fs::temp_directory_path() / "forge-test-binds.txt";
+    CHECK(in.saveBinds(path.string()));
+    Input fromFile;
+    CHECK(fromFile.loadBinds(path.string(), &err));
+    CHECK(fromFile.actionDown("nothing") == false);
+    fs::remove(path);
+
+    // Deadzone/curve setters clamp.
+    in.setStickDeadzone(2.0f);
+    CHECK_CLOSE(in.stickDeadzone(), 1.0f, 1e-5f);
+    in.setStickCurve(-1.0f);
+    CHECK_CLOSE(in.stickCurve(), 0.0f, 1e-5f);
+    std::printf("input-depth ok\n");
+}
+
 int main() {
     std::printf("forge %s (tests)\n", FORGE_VERSION);
     testMath();
@@ -858,6 +1650,7 @@ int main() {
     testPhysics();
     testPhysicsExtra();
     testPhysicsSolver();
+    testPhysicsFeatures();
     testScenePhysics();
     testCamera();
     testInput();
@@ -868,6 +1661,15 @@ int main() {
     testAnim();
     testAudioHeadless();
     testScene();
+    testJson();
+    testScript();
+    testAtlas();
+    testAssetResolve();
+    testSkeleton();
+    testLightingBookkeeping();
+    testSerialization();
+    testFontUtf8();
+    testInputDepth();
     if (failures == 0) std::printf("ALL TESTS PASSED\n");
     else std::printf("%d FAILURES\n", failures);
     return failures == 0 ? 0 : 1;

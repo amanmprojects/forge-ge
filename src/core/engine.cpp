@@ -1,9 +1,13 @@
 #include "forge/core/engine.hpp"
 #include "forge/graphics/gl_loader.hpp"
 #include "forge/core/logger.hpp"
+#include "forge/core/platform.hpp"
 #include "forge/utils/profiler.hpp"
 #include <SDL3/SDL.h>
 #include <cstring>
+#if FORGE_PLATFORM_WEB
+#include <emscripten.h>
+#endif
 
 namespace forge {
 
@@ -16,7 +20,8 @@ static void* glProc(const char* name) {
     return v;
 }
 
-Engine::Engine(const EngineConfig& cfg) : cfg_(cfg), stepper_(cfg.fixedStep, cfg.maxSteps) {
+Engine::Engine(const EngineConfig& cfg)
+    : window_(cfg.window), cfg_(cfg), stepper_(cfg.fixedStep, cfg.maxSteps) {
     if (!window_.valid()) {
         FORGE_LOG_FATAL("Engine: window creation failed, aborting");
         return;
@@ -138,6 +143,36 @@ bool Engine::pumpEvents() {
             case SDL_EVENT_TEXT_INPUT:
                 input_.pushText(ev.text.text);
                 break;
+            case SDL_EVENT_TEXT_EDITING:
+                // IME composition preview. SDL gives the selection in UTF-8
+                // byte offsets; cursor = start when there is no selection.
+                // An empty composition means the IME session ended.
+                input_.setComposition(ev.edit.text, ev.edit.start);
+                break;
+            case SDL_EVENT_FINGER_DOWN:
+            case SDL_EVENT_FINGER_MOTION:
+            case SDL_EVENT_FINGER_UP:
+            case SDL_EVENT_FINGER_CANCELED: {
+                // SDL finger coordinates are normalized (0..1) over the window;
+                // convert to drawable pixels to match the mouse API.
+                IVec2 draw = window_.drawableSize();
+                Vec2 p{ev.tfinger.x * (float)draw.x, ev.tfinger.y * (float)draw.y};
+                switch (ev.type) {
+                    case SDL_EVENT_FINGER_DOWN:
+                        input_.touchDown((int64_t)ev.tfinger.fingerID, p, ev.tfinger.pressure);
+                        break;
+                    case SDL_EVENT_FINGER_MOTION:
+                        input_.touchMove((int64_t)ev.tfinger.fingerID, p, ev.tfinger.pressure);
+                        break;
+                    case SDL_EVENT_FINGER_UP:
+                        input_.touchUp((int64_t)ev.tfinger.fingerID);
+                        break;
+                    default:
+                        input_.touchCancel((int64_t)ev.tfinger.fingerID);
+                        break;
+                }
+                break;
+            }
             case SDL_EVENT_MOUSE_BUTTON_DOWN:
             case SDL_EVENT_MOUSE_BUTTON_UP:
                 input_.setMouseButton(sdlToMouse(ev.button.button), ev.button.down);
@@ -268,50 +303,80 @@ void Engine::pace() {
     lastSwap_ = SDL_GetPerformanceCounter();
 }
 
-void Engine::runFixed(std::function<void(float)> update, std::function<void()> render) {
-    Camera2D cam; // unused default; render() owns its batch begin/end
-    (void)cam;
-    while (!quitting_) {
-        Profiler::instance().beginFrame();
-        if (!pumpEvents()) break;
-        float dt = time_.tick();
-        {
-            FORGE_ZONE("update");
-            stepper_.update(dt, [&](float step) {
-                update(step);
-                // Commit after each observed step: an edge latched during a
-                // 0-step frame survives until an update sees it (exactly once).
-                input_.endFrame();
-            });
-        }
-        {
-            FORGE_ZONE("render");
-            batch_.resetStats();
-            render();
-        }
-        window_.swapBuffers();
-        pace();
-        Profiler::instance().endFrame();
-        assets_.update();
+void Engine::frameFixed() {
+    Profiler::instance().beginFrame();
+    if (!pumpEvents()) return; // quitting: no batch was begun (see runFixed)
+    float dt = time_.tick();
+    {
+        FORGE_ZONE("update");
+        stepper_.update(dt, [&](float step) {
+            updateFn_(step);
+            // Commit after each observed step: an edge latched during a
+            // 0-step frame survives until an update sees it (exactly once).
+            input_.endFrame();
+        });
     }
+    {
+        FORGE_ZONE("render");
+        batch_.resetStats();
+        renderFn_();
+    }
+    window_.swapBuffers();
+    pace();
+    Profiler::instance().endFrame();
+    assets_.update();
+}
+
+void Engine::frameVariable() {
+    Profiler::instance().beginFrame();
+    if (!pumpEvents()) return;
+    float dt = time_.tick();
+    batch_.resetStats();
+    frameFn_(dt);
+    input_.endFrame(); // frame() observed this window; commit it
+    window_.swapBuffers();
+    pace();
+    Profiler::instance().endFrame();
+    assets_.update();
+}
+
+void Engine::loopTrampoline(void* userdata) {
+    Engine* e = (Engine*)userdata;
+    if (e->quitting_) return; // loop was cancelled by quit()
+    if (e->fixedLoop_) e->frameFixed();
+    else e->frameVariable();
+}
+
+void Engine::runFixed(std::function<void(float)> update, std::function<void()> render) {
+    updateFn_ = std::move(update);
+    renderFn_ = std::move(render);
+    fixedLoop_ = true;
+#if FORGE_PLATFORM_WEB
+    // The browser drives the frames. simulate_infinite_loop unwinds this
+    // stack, so the engine and everything it points at must live outside it
+    // (see docs/agents/01-getting-started.md, "Web build").
+    emscripten_set_main_loop_arg(&Engine::loopTrampoline, this, 0, 1);
+#else
+    while (!quitting_) frameFixed();
+#endif
 }
 
 void Engine::runVariable(std::function<void(float)> frame) {
-    while (!quitting_) {
-        Profiler::instance().beginFrame();
-        if (!pumpEvents()) break;
-        float dt = time_.tick();
-        batch_.resetStats();
-        frame(dt);
-        input_.endFrame(); // frame() observed this window; commit it
-        window_.swapBuffers();
-        pace();
-        Profiler::instance().endFrame();
-        assets_.update();
-    }
+    frameFn_ = std::move(frame);
+    fixedLoop_ = false;
+#if FORGE_PLATFORM_WEB
+    emscripten_set_main_loop_arg(&Engine::loopTrampoline, this, 0, 1);
+#else
+    while (!quitting_) frameVariable();
+#endif
 }
 
 } // namespace forge
 
-// SDL3 requires SDL_main entry point handling
+// SDL3 entry point handling: including SDL_main.h without SDL_MAIN_HANDLED
+// defines main() (Windows: WinMain) and renames the app's main to SDL_main on
+// the platforms that need it. A library must not own the entry point - on
+// Emscripten the app keeps a plain main() and emscripten calls it - so
+// SDL_MAIN_HANDLED keeps the two from fighting over the symbol.
+#define SDL_MAIN_HANDLED 1
 #include <SDL3/SDL_main.h>

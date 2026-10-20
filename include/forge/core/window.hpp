@@ -32,6 +32,8 @@ public:
     bool valid() const { return window_ != nullptr; }
     void swapBuffers();
     void setTitle(const std::string& t);
+    const std::string& title() const { return cfg_.title; }
+    const WindowConfig& config() const { return cfg_; }
     void setVSync(bool on);
     bool vsync() const { return vsync_; }
 

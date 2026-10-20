@@ -8,6 +8,28 @@ namespace forge {
 
 AssetManager::AssetManager(AudioEngine* audio) : audio_(audio) {}
 
+void AssetManager::addSearchPath(const std::string& dir) {
+    if (dir.empty()) return;
+    std::string normalized = dir;
+    if (normalized.back() != '/') normalized += '/';
+    for (auto& p : searchPaths_)
+        if (p == normalized) return;
+    searchPaths_.push_back(std::move(normalized));
+}
+
+std::string AssetManager::resolve(const std::string& path) const {
+    if (path.empty()) return path;
+    // Absolute paths (and Windows drive paths) bypass the search list.
+    if (path[0] == '/' || (path.size() > 1 && path[1] == ':')) return path;
+    struct stat st{};
+    if (::stat(path.c_str(), &st) == 0) return path;
+    for (const auto& dir : searchPaths_) {
+        std::string candidate = dir + path;
+        if (::stat(candidate.c_str(), &st) == 0) return candidate;
+    }
+    return path;
+}
+
 int64_t AssetManager::fileMtime(const std::string& path) {
     struct stat st{};
     if (::stat(path.c_str(), &st) != 0) return 0;
@@ -33,11 +55,12 @@ Texture2D* AssetManager::loadTexture(const std::string& path, TextureFilter filt
         }
         return it->second.tex.get();
     }
+    std::string resolved = resolve(path);
     auto tex = std::make_unique<Texture2D>();
-    if (!tex->loadFile(path, true, filter)) return nullptr;
+    if (!tex->loadFile(resolved, true, filter)) return nullptr;
     Texture2D* ptr = tex.get();
-    textures_[path] = TexEntry{std::move(tex), fileMtime(path), filter};
-    FORGE_LOG_DEBUG("Asset: texture '%s' (%dx%d)", path.c_str(), ptr->width(), ptr->height());
+    textures_[path] = TexEntry{std::move(tex), fileMtime(resolved), filter};
+    FORGE_LOG_DEBUG("Asset: texture '%s' (%dx%d)", resolved.c_str(), ptr->width(), ptr->height());
     return ptr;
 }
 
@@ -49,10 +72,11 @@ Font* AssetManager::loadFont(const std::string& path, float pxHeight) {
     std::string key = path + "#" + std::to_string(bits);
     auto it = fonts_.find(key);
     if (it != fonts_.end()) return it->second.font.get();
+    std::string resolved = resolve(path);
     auto f = std::make_unique<Font>();
-    if (!f->loadFile(path, pxHeight)) return nullptr;
+    if (!f->loadFile(resolved, pxHeight)) return nullptr;
     Font* ptr = f.get();
-    fonts_[key] = FontEntry{std::move(f), fileMtime(path), pxHeight};
+    fonts_[key] = FontEntry{std::move(f), fileMtime(resolved), pxHeight};
     return ptr;
 }
 
@@ -63,8 +87,9 @@ SoundHandle AssetManager::loadSound(const std::string& path) {
         FORGE_LOG_ERROR("Asset: no AudioEngine for '%s'", path.c_str());
         return {};
     }
-    SoundHandle h = audio_->loadFile(path);
-    if (h.valid()) sounds_[path] = SoundEntry{h, fileMtime(path)};
+    std::string resolved = resolve(path);
+    SoundHandle h = audio_->loadFile(resolved);
+    if (h.valid()) sounds_[path] = SoundEntry{h, fileMtime(resolved)};
     return h;
 }
 
@@ -72,9 +97,25 @@ void AssetManager::unloadTexture(const std::string& path) {
     textures_.erase(path);
 }
 
+Shader* AssetManager::loadShader(const std::string& vertPath, const std::string& fragPath) {
+    std::string key = vertPath + "|" + fragPath;
+    auto it = shaders_.find(key);
+    if (it != shaders_.end()) return it->second.shader.get();
+    std::string v = resolve(vertPath), f = resolve(fragPath);
+    auto shader = std::make_unique<Shader>();
+    if (!shader->loadFiles(v, f)) {
+        FORGE_LOG_ERROR("Asset: shader '%s' + '%s' failed", v.c_str(), f.c_str());
+        return nullptr;
+    }
+    Shader* ptr = shader.get();
+    shaders_[key] = ShaderEntry{std::move(shader), v, f, fileMtime(v), fileMtime(f)};
+    return ptr;
+}
+
 void AssetManager::clear() {
     textures_.clear();
     fonts_.clear();
+    shaders_.clear();
     if (audio_) {
         for (auto& kv : sounds_) audio_->unload(kv.second.handle);
     }
@@ -84,10 +125,11 @@ void AssetManager::clear() {
 int AssetManager::hotReload() {
     int n = 0;
     for (auto& kv : textures_) {
-        int64_t mt = fileMtime(kv.first);
+        std::string path = resolve(kv.first);
+        int64_t mt = fileMtime(path);
         if (mt > kv.second.mtime) {
             Texture2D tmp;
-            if (tmp.loadFile(kv.first, true, kv.second.filter)) {
+            if (tmp.loadFile(path, true, kv.second.filter)) {
                 *kv.second.tex = std::move(tmp);
                 kv.second.mtime = mt;
                 ++n;
@@ -96,7 +138,7 @@ int AssetManager::hotReload() {
         }
     }
     for (auto& kv : fonts_) {
-        std::string path = kv.first.substr(0, kv.first.find('#'));
+        std::string path = resolve(kv.first.substr(0, kv.first.find('#')));
         int64_t mt = fileMtime(path);
         if (mt > kv.second.mtime) {
             Font tmp;
@@ -109,13 +151,29 @@ int AssetManager::hotReload() {
     }
     if (audio_) {
         for (auto& kv : sounds_) {
-            int64_t mt = fileMtime(kv.first);
+            int64_t mt = fileMtime(resolve(kv.first));
             if (mt > kv.second.mtime) {
-                if (audio_->reloadFile(kv.second.handle, kv.first)) {
+                if (audio_->reloadFile(kv.second.handle, resolve(kv.first))) {
                     kv.second.mtime = mt;
                     ++n;
                     FORGE_LOG_INFO("Hot-reload: '%s'", kv.first.c_str());
                 }
+            }
+        }
+    }
+    // Shaders: reload only when a source file changed, and only swap on a
+    // successful compile so a typo never blanks the running game.
+    for (auto& kv : shaders_) {
+        int64_t vm = fileMtime(kv.second.vertPath);
+        int64_t fm = fileMtime(kv.second.fragPath);
+        if (vm > kv.second.vertMtime || fm > kv.second.fragMtime) {
+            Shader tmp;
+            if (tmp.loadFiles(kv.second.vertPath, kv.second.fragPath)) {
+                *kv.second.shader = std::move(tmp);
+                kv.second.vertMtime = vm;
+                kv.second.fragMtime = fm;
+                ++n;
+                FORGE_LOG_INFO("Hot-reload: shader '%s'", kv.first.c_str());
             }
         }
     }

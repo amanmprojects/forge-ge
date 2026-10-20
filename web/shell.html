@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Forge Chess &mdash; rules + bot, in WebAssembly</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ctext x='3' y='26' font-size='26'%3E%E2%99%9E%3C/text%3E%3C/svg%3E">
+  <style>
+    :root { color-scheme: dark; }
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0; min-height: 100%; background: #15181c; color: #c9d1d9;
+      font: 14px/1.5 ui-monospace, "DejaVu Sans Mono", Menlo, Consolas, monospace;
+    }
+    body { display: flex; flex-direction: column; align-items: center; justify-content: center;
+           gap: 14px; padding: 18px; }
+    header { text-align: center; }
+    h1 { margin: 0; font-size: 20px; font-weight: 700; letter-spacing: .22em; color: #e6edf3; }
+    p.sub { margin: 5px 0 0; color: #8b949e; font-size: 12px; }
+    #stage { position: relative; line-height: 0; }
+    canvas {
+      display: block; aspect-ratio: 8 / 5;
+      /* Width is explicit: SDL follows the DOM size, so `auto` would chase
+         its own drawing buffer. The third term caps the height at ~74vh. */
+      width: min(96vw, 1400px, calc(74vh * 8 / 5)); height: auto;
+      background: #101317; border: 1px solid #2b3137; border-radius: 6px;
+      outline: none; touch-action: none; cursor: pointer;
+    }
+    #overlay {
+      position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center;
+      justify-content: center; gap: 12px; background: #101317f2; border-radius: 6px;
+      text-align: center; padding: 20px; transition: opacity .3s ease;
+    }
+    #overlay.gone { opacity: 0; pointer-events: none; }
+    #bar { width: min(280px, 55vw); height: 4px; background: #21262d; border-radius: 2px; overflow: hidden; }
+    #fill { width: 0%; height: 100%; background: #7fb069; transition: width .2s ease; }
+    #status { font-size: 12px; color: #8b949e; }
+    #hint { font-size: 12px; color: #6e7681; }
+    footer { color: #6e7681; font-size: 12px; text-align: center; max-width: 900px; }
+    kbd { background: #21262d; border: 1px solid #30363d; border-radius: 3px; padding: 0 4px; color: #adbac7; }
+    footer a { color: #7fa6d9; text-decoration: none; }
+    footer a:hover { text-decoration: underline; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>FORGE CHESS</h1>
+    <p class="sub">rules-complete chess &middot; Cburnett pieces &middot; negamax bot &middot; compiled to WebAssembly</p>
+  </header>
+
+  <div id="stage">
+    <canvas id="canvas" oncontextmenu="event.preventDefault()" tabindex="-1"></canvas>
+    <div id="overlay">
+      <div id="bar"><div id="fill"></div></div>
+      <div id="status">Downloading&hellip;</div>
+      <div id="hint">click the board once to give it keyboard focus</div>
+    </div>
+  </div>
+
+  <footer>
+    drag or click a piece, then a target square &middot; arrows + <kbd>Enter</kbd> also move &middot;
+    <kbd>U</kbd> undo &middot; <kbd>F</kbd> flip &middot; <kbd>H</kbd> hint &middot; <kbd>N</kbd> new game &middot;
+    <kbd>1</kbd>&ndash;<kbd>5</kbd> level &middot; <kbd>ESC</kbd> pause<br>
+    <span style="opacity:.75">Forge (SDL3 + OpenGL/WebGL2) &middot; chess core ported from
+    <a href="https://github.com/amanmprojects/chess">amanmprojects/chess</a></span>
+  </footer>
+
+  <script type="text/javascript">
+    var statusElement = document.getElementById('status');
+    var fillElement = document.getElementById('fill');
+    var overlayElement = document.getElementById('overlay');
+    var canvasElement = document.getElementById('canvas');
+
+    // Losing the context is recoverable only by reloading; tell the user instead
+    // of silently freezing the board.
+    canvasElement.addEventListener('webglcontextlost', function (e) {
+      overlayElement.classList.remove('gone');
+      statusElement.textContent = 'WebGL context lost - reload the page';
+      e.preventDefault();
+    }, false);
+
+    var setStatus = function (text) {
+      if (!text) return;
+      var m = /([^(]+)\((\d+(?:\.\d+)?)\/(\d+)\)/.exec(text);
+      if (m) {
+        var done = parseFloat(m[2]), all = parseFloat(m[3]);
+        if (all > 0) fillElement.style.width = (100 * done / all).toFixed(0) + '%';
+        statusElement.textContent = 'Downloading ' + (100 * done / all).toFixed(0) + '%';
+      } else {
+        statusElement.textContent = text;
+      }
+    };
+
+#if MODULARIZE && !EXPORT_ES6
+    var moduleArgs = {
+#else
+    var Module = {
+#endif
+      canvas: canvasElement,
+      setStatus: setStatus,
+      print: function () { console.log.apply(console, arguments); },
+      printErr: function () { console.warn.apply(console, arguments); },
+      monitorRunDependencies: function (left) {
+        this.totalDependencies = Math.max(this.totalDependencies || 0, left);
+        if (!left) {
+          overlayElement.classList.add('gone');
+          canvasElement.focus();
+        }
+      },
+      onAbort: function (what) {
+        overlayElement.classList.remove('gone');
+        statusElement.textContent = 'abort: ' + what + ' (see the console)';
+      }
+    };
+    window.onerror = window.onunhandledrejection = function () {
+      overlayElement.classList.remove('gone');
+      statusElement.textContent = 'exception thrown - see the JavaScript console';
+      setStatus = function (t) { if (t) console.error('[post-exception] ' + t); };
+    };
+  </script>
+  {{{ SCRIPT }}}
+#if MODULARIZE && !EXPORT_ES6
+  <script type="text/javascript">
+    {{{ EXPORT_NAME }}}(moduleArgs);
+  </script>
+#endif
+</body>
+</html>

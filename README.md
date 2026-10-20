@@ -3,7 +3,10 @@
 # Forge — a batteries-included 2D game engine in C++
 
 Forge is a high-performance, dependency-light C++20 engine for 2D games.
-One static library, one umbrella header, nine runnable examples.
+One static library, one umbrella header, ten runnable examples. Version 0.2.0
+adds lighting, post-processing, scripting, serialization, bitmap fonts,
+multi-tileset/infinite tilemaps and slopes, physics filtering/joints, and a
+zero-dependency debug overlay — see [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
 **System dependencies: SDL3 + OpenGL only.** Everything else
 (`stb_image`, `stb_truetype`, `miniaudio`, the GL loader) is vendored in
@@ -19,14 +22,15 @@ still one per flush, never one per sprite.
 
 | Module | What you get |
 |---|---|
-| `core` | `Engine` (fixed/variable loop), `Window` (SDL3 + GL 3.3), `Input` (keys, mouse, 4 gamepads, action mapping), `Time`, `Logger` |
+| `core` | `Engine` (fixed/variable loop, config-driven window), `Window` (SDL3 + GL 3.3), `Input` (keys, mouse, 4 gamepads, touch, IME composition, action mapping + persisted remaps), `Time`, `Logger` |
 | `math` | Header-only `Vec2/Mat4/Rect/Circle/Color`, PCG `Random`, easings, value noise/fBm, narrowphase helpers |
-| `graphics` | `SpriteBatch` (8192 quads/flush, 16 texture slots), `Camera2D` (follow, trauma shake), `Texture2D`, `Font` (TTF atlas), `Framebuffer`, `ParticleSystem`, `Animator` + `Tweens`, `Tilemap` (CSV + Tiled JSON, culling, solid queries) |
-| `physics` | AABB `PhysicsWorld` (spatial-hash broadphase, substeps, friction/restitution, sensors, raycast, rect queries) |
+| `graphics` | `SpriteBatch` (8192 quads/flush, 16 texture slots, blend modes, scissor, nine-slice), `Camera2D` (follow, trauma shake), `Texture2D`, `Font` (UTF-8 TTF atlas + BMFont), `Framebuffer` (MSAA/resolve/resize), `AtlasPacker`, `LightingSystem` (lights, flicker, shadows), `PostProcess`/`FullscreenPass`/`RenderTargetStack`, `Skeleton`, `ParticleSystem`, `Animator` + `Tweens`, `Tilemap` (multi-tileset, flips, infinite maps, object layers, parallax, autotile, slopes) |
+| `physics` | AABB + circle `PhysicsWorld` (spatial-hash broadphase, layer/mask filtering, sensors + trigger enter/exit, one-way platforms, moving-platform carry, distance/spring joints, CCD substeps, raycast, rect queries, `debugDraw`) |
 | `audio` | `AudioEngine` (WAV/MP3/OGG/FLAC via miniaudio, 32-voice pool, music/sfx buses, pan/pitch/loop) |
-| `scene` | Generational `ECS Registry` (sparse-set pools, `view<Ts>`), `Scene` with `Transform/Sprite/Velocity/Collider/Script` — collider entities sync into `Scene::physics()` automatically (Velocity present = dynamic, else static) |
-| `assets` | `AssetManager` (texture/font/sound cache + mtime hot-reload) |
-| `utils` | `Profiler` (scoped zones, frame graph, compiles to no-ops with `FORGE_PROFILING=0`) |
+| `scene` | Generational `ECS Registry` (sparse-set pools, `view<Ts>`), `Scene` with `Transform/Sprite/Velocity/Collider/Script/ScriptRef` — collider entities sync into `Scene::physics()` automatically (Velocity present = dynamic, else static); versioned JSON scene save/load + prefabs |
+| `assets` | `AssetManager` (texture/font/sound/shader cache, search paths, mtime hot-reload; a failed shader recompile keeps the old program) |
+| `script` | `forge::script` — a small deterministic interpreter (`var`/`fn`/`if`/`while`/tables, step budget, errors never throw) |
+| `utils` | `Profiler` (scoped zones, frame graph, compiles to no-ops with `FORGE_PROFILING=0`), `json` (ordered, header-only, atomic writes), `DebugOverlay` (F1 FPS/stats/log panel, no ImGui) |
 
 ## Documentation
 
@@ -41,6 +45,8 @@ copyable task patterns, and check
 
 - C++20 compiler (GCC 13+, Clang 16+), CMake 3.20+, Ninja/Make
 - SDL3 development files (`pkg-config sdl3`), OpenGL headers/drivers
+- Web build only: the [Emscripten SDK](https://emscripten.org) (SDL3 and
+  WebGL2 come from the browser/port, no system SDL3 needed)
 
 ```bash
 # Arch
@@ -64,6 +70,8 @@ ctest --test-dir build          # headless unit tests (engine + chess perft suit
 ./build/07_breakout             # Atari Breakout (A/D · arrows · mouse · gamepad, SPACE launch, ESC pause)
 ./build/08_snake                # classic Snake (WASD/arrows/gamepad, ESC pause, golden apples, bot demo)
 ./build/09_chess                # full chess: click/drag or arrows+Enter, 5 bot levels, U/F/H/N/ESC
+./build/10_lantern              # tilemap + ramp + lighting + post + script hot reload + scene save/load
+./build/10_lantern --selftest   # headless save/load round-trip (CI), exit 0/1
 ```
 
 CMake options: `-DFORGE_BUILD_EXAMPLES=OFF`, `-DFORGE_BUILD_TESTS=OFF`,
@@ -72,9 +80,22 @@ the code macro it drives is `FORGE_PROFILING`, always defined 0/1),
 `-DFORGE_ENABLE_SANITIZERS=ON|OFF` (ASan+UBSan; default ON for single-config
 Debug builds).
 
-### Headless capture (`07_breakout`, `08_snake`, `09_chess`)
+### Web build (`09_chess`)
 
-All three games double as render/sim tests: with `--shot` they run N fixed
+```bash
+./web/build.sh                      # needs the Emscripten SDK; writes web/dist/
+python3 -m http.server 8000 -d web/dist
+cd web/dist && vercel link --project forge-chess && vercel deploy --prod
+```
+
+`web/build.sh` builds `09_chess` for the browser: SDL3 comes from Emscripten's
+port, the OpenGL path maps onto WebGL2, and the chess assets (sprites, font) are
+preloaded into the wasm filesystem. See [`web/README.md`](web/README.md) for what
+the port changes and why the game state must outlive `main()`.
+
+### Headless capture (`07_breakout`, `08_snake`, `09_chess`, `10_lantern`)
+
+All four games double as render/sim tests: with `--shot` they run N fixed
 1/60 s steps under a scripted autopilot (bot vs bot for chess), render the
 final frame into an offscreen `Framebuffer` and write a PNG. Everything is
 seeded (`--seed`) and clock-free, so the same arguments reproduce the same
@@ -109,13 +130,25 @@ CI=1 ./build/08_snake --frames 240                               # smoke run, ex
 ./build/09_chess --shot promo.png --click a7,a8 \
     --fen "4k3/P6p/8/8/8/8/8/4K3 w - - 0 1"                      # promotion dialog
 CI=1 ./build/09_chess                                            # plays a game, exit 0/1
+
+./build/10_lantern --shot lantern.png --frames 600               # lit scene + HUD
+CI=1 ./build/10_lantern --frames 240                             # smoke run, exit 0/1
 ```
+
+`10_lantern` is the integration example for the 0.2.0 systems: a Tiled map with
+a slope, a player lantern, `LightingSystem`, a vignette `PostProcess`, a
+`.fgs` script that hot-reloads on **F2**, scene save/load on **F5/F9**, the
+`DebugOverlay` on **F1**, wireframes on **F3**, and touch drag. It runs with
+zero external assets (procedural tiles, built-in script fallback).
 
 Text is drawn with a TTF picked from the usual system paths (DejaVu Sans Mono
 Bold, Adwaita Mono, Liberation Mono, Noto, Menlo, Consolas). If none is found
-the HUD and menus fall back to shape-only and the game stays playable — the
-examples ship no asset files of their own; sprites, HUD and SFX are all
-procedural.
+the HUD and menus fall back to shape-only and the game stays playable. HUD,
+sprites and SFX are procedural throughout — the one asset exception is the
+chess piece set in `examples/chess/assets/` (18 PNGs rasterized by
+`make_pieces.sh` from the SVGs of `amanmprojects/chess`, the classic Cburnett
+pieces, CC BY-SA 3.0). Delete that folder and `09_chess` draws silhouettes
+instead, so every example still runs with zero assets.
 
 `--shot` also prints `sane=0|1` from an invariant check (Breakout: no NaN,
 ball/paddle inside the field, speed capped; Snake: no NaN timers, body/food
@@ -223,16 +256,23 @@ scene.registry().emplace<forge::Velocity>(e, forge::Velocity{{60, 0}});
 include/forge/   public headers (forge.hpp umbrella)
 src/             implementations (core, graphics, physics, audio, scene, assets, utils)
 third_party/     stb_image, stb_truetype, stb_image_write, miniaudio (vendored)
-examples/        01_hello … 09_chess
+examples/        01_hello … 10_lantern
 examples/chess/  engine-free chess core (0x88 rules + bot) shared with tests/
 tests/           headless unit tests (ctest; engine suite + chess perft)
 ```
 
 ## Roadmap
 
-- TMX infinite maps, autotiling helpers, parallax layers
-- 2D lights/shadows, skeletal (Spine-compatible) animation
-- Lua scripting bindings, ImGui debug overlay, save/archive format
-- Emscripten (WebGL2) + Windows/macOS CI
+0.2.0 shipped the 0.1.0 correctness debt plus the planned systems: window
+config, UTF-8/wrapped/bitmap text, MSAA targets, multi-tileset/infinite
+tilemaps with slopes and object layers, physics filtering/sensors/one-way/
+joints, lighting, post-processing, atlas packing, skeletal animation, scene
+serialization + prefabs, a dependency-free scripting VM, an F1 debug overlay,
+touch/IME input, installable CMake package, and a WebAssembly build.
+
+The living plan (with acceptance criteria and what is deliberately out of
+scope) is [`docs/ROADMAP.md`](docs/ROADMAP.md). Explicit non-goals: 3D, full
+rigid-body/soft-body simulation, a visual editor, networking, and hard
+dependencies on ImGui/Lua/Box2D/Spine.
 
 Contributions welcome — MIT licensed.

@@ -50,6 +50,8 @@ typedef unsigned int GLbitfield;
 #define GL_LINK_STATUS 0x8B82
 #define GL_INFO_LOG_LENGTH 0x8B84
 #define GL_TRIANGLES 0x0004
+#define GL_TRIANGLE_FAN 0x0006
+#define GL_TRIANGLE_STRIP 0x0005
 #define GL_LINES 0x0001
 #define GL_LINE_STRIP 0x0003
 #define GL_POINTS 0x0000
@@ -59,6 +61,11 @@ typedef unsigned int GLbitfield;
 #define GL_SRC_ALPHA 0x0302
 #define GL_ONE_MINUS_SRC_ALPHA 0x0303
 #define GL_ONE 1
+#define GL_SRC_COLOR 0x0300
+#define GL_ONE_MINUS_SRC_COLOR 0x0301
+#define GL_DST_COLOR 0x0306
+#define GL_ONE_MINUS_DST_COLOR 0x0307
+#define GL_SRC_ALPHA_SATURATE 0x0308
 #define GL_ZERO 0
 #define GL_FUNC_ADD 0x8006
 #define GL_TEXTURE_MIN_FILTER 0x2801
@@ -76,9 +83,13 @@ typedef unsigned int GLbitfield;
 #define GL_VIEWPORT 0x0BA2
 #define GL_SCISSOR_TEST 0x0C11
 #define GL_FRAMEBUFFER 0x8D40
+#define GL_READ_FRAMEBUFFER 0x8CA8
+#define GL_DRAW_FRAMEBUFFER 0x8CA9
 #define GL_DRAW_FRAMEBUFFER_BINDING 0x8CA6
+#define GL_RENDERBUFFER 0x8D41
 #define GL_COLOR_ATTACHMENT0 0x8CE0
 #define GL_FRAMEBUFFER_COMPLETE 0x8CD5
+#define GL_MULTISAMPLE 0x809D
 #define GL_DEPTH_TEST 0x0B71
 #define GL_CULL_FACE 0x0B44
 #define GL_VERSION 0x1F02
@@ -147,8 +158,14 @@ using ProcLoader = void* (*)(const char*);
     X(glGenFramebuffers, void, (GLsizei n, GLuint* ids)) \
     X(glBindFramebuffer, void, (GLenum target, GLuint framebuffer)) \
     X(glFramebufferTexture2D, void, (GLenum target, GLenum attachment, GLenum textarget, GLuint texture, GLint level)) \
+    X(glFramebufferRenderbuffer, void, (GLenum target, GLenum attachment, GLenum renderbuffertarget, GLuint renderbuffer)) \
     X(glCheckFramebufferStatus, GLenum, (GLenum target)) \
     X(glDeleteFramebuffers, void, (GLsizei n, const GLuint* framebuffers)) \
+    X(glGenRenderbuffers, void, (GLsizei n, GLuint* renderbuffers)) \
+    X(glBindRenderbuffer, void, (GLenum target, GLuint renderbuffer)) \
+    X(glRenderbufferStorageMultisample, void, (GLenum target, GLsizei samples, GLenum internalformat, GLsizei width, GLsizei height)) \
+    X(glDeleteRenderbuffers, void, (GLsizei n, const GLuint* renderbuffers)) \
+    X(glBlitFramebuffer, void, (GLint srcX0, GLint srcY0, GLint srcX1, GLint srcY1, GLint dstX0, GLint dstY0, GLint dstX1, GLint dstY1, GLbitfield mask, GLenum filter)) \
     X(glScissor, void, (GLint x, GLint y, GLsizei width, GLsizei height)) \
     X(glGetIntegerv, void, (GLenum pname, GLint* data)) \
     X(glReadPixels, void, (GLint x, GLint y, GLsizei width, GLsizei height, GLenum format, GLenum type, void* pixels))

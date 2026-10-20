@@ -1,5 +1,6 @@
 #include "forge/core/window.hpp"
 #include "forge/core/logger.hpp"
+#include "forge/core/platform.hpp"
 #include <SDL3/SDL.h>
 
 namespace forge {
@@ -36,9 +37,16 @@ void Window::create(const WindowConfig& cfg) {
         }
     }
 
+#if FORGE_PLATFORM_WEB
+    // WebGL2 is OpenGL ES 3.0; there is no 3.3 core profile in the browser.
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_ES);
+#else
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
+#endif
     SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
     SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
     SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE, 8);
@@ -73,7 +81,11 @@ void Window::create(const WindowConfig& cfg) {
     int w, h;
     SDL_GetWindowSize((SDL_Window*)window_, &w, &h);
     w_ = w; h_ = h;
+#if FORGE_PLATFORM_WEB
+    FORGE_LOG_INFO("Window '%s' %dx%d created (WebGL2 / GL ES 3.0)", cfg.title.c_str(), w_, h_);
+#else
     FORGE_LOG_INFO("Window '%s' %dx%d created (GL 3.3 core)", cfg.title.c_str(), w_, h_);
+#endif
 }
 
 void Window::destroy() {
@@ -86,6 +98,7 @@ void Window::swapBuffers() {
 }
 
 void Window::setTitle(const std::string& t) {
+    cfg_.title = t;
     if (window_) SDL_SetWindowTitle((SDL_Window*)window_, t.c_str());
 }
 

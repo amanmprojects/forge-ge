@@ -7,11 +7,11 @@ the module pages.
 ## Window, title, quitting
 
 ```cpp
-forge::EngineConfig cfg;          // window fields are ignored in 0.1.0
+forge::EngineConfig cfg;          // window fields apply at construction
 cfg.quitOnEscape = false;         // set true if ESC should quit globally
 forge::Engine engine(cfg);
 if (!engine.valid()) return 1;
-engine.window().setTitle("My Game");   // title must be set at runtime
+engine.window().setTitle("My Game");   // optional: retitle at runtime
 
 // in the frame callback:
 if (engine.input().pressed(forge::Key::P)) engine.quit();
@@ -396,6 +396,175 @@ For CI, either capture or just run `frames` updates and exit with the sane
 flag (`CI=1 ./build/07_breakout --frames 240`). Seed everything: gameplay RNG,
 particle systems, camera shake is already deterministic.
 
+## Lighting a 2D scene
+
+```cpp
+forge::LightingSystem lights;
+lights.init(vp.x, vp.y);
+lights.setAmbient(forge::Color::fromHex(0x1B2233FF));   // dark blue night
+
+// once, or per frame if your lights move (clearLights() then addLight)
+forge::Light2D lantern;
+lantern.pos = player.pos;
+lantern.radius = 220.0f;
+lantern.color = forge::Color::fromHex(0xFFD9A0FF);
+lantern.intensity = 1.0f;
+lantern.flickerAmount = 0.06f;   // deterministic sine flicker
+lantern.flickerSpeed = 9.0f;
+lights.addLight(lantern);
+
+// after the world pass has ended, before the HUD pass:
+lights.update(dt);
+lights.render(batch, cam, vp);
+```
+
+If the world is rendered into an FBO (for a post effect or a `--shot`
+capture), pass that target so the composite lands back in it:
+
+```cpp
+lights.render(batch, cam, vp, &sceneFbo);
+```
+
+Shadows: `lantern.shadows = true;` plus `lights.addOccluder(a, b)` for each
+wall segment. Shadow polygons also darken the ambient term, which is usually
+what you want in a cave. `10_lantern` shows the full pipeline.
+
+## Post-processing (vignette, scanlines, custom)
+
+```cpp
+forge::PostProcess fx;
+fx.init(forge::PostProcess::Effect::Vignette);
+fx.setVignette(0.55f, 0.72f);
+fx.setScanlines(0.04f);
+
+// world -> FBO
+sceneFbo.bind();
+/* batch pass */
+forge::Framebuffer::unbind(vp.x, vp.y);
+
+// FBO texture -> screen through the effect (between batch passes!)
+forge::Texture2D view;
+view.adoptRaw(sceneFbo.texture(), sceneFbo.width(), sceneFbo.height(), false);
+fx.apply(view, vp);
+
+// HUD afterwards, so text stays crisp
+```
+
+`fx.apply` binds its own shader/VAO and disables blending, so it must run
+between `batch.begin()`/`end()` calls. For a custom effect use `FullscreenPass`
+directly with your own fragment shader (`uTexture`, `uResolution` are set for
+you). `RenderTargetStack` handles nested FBOs if you need more than one pass.
+
+## Text: wrapping, clipping, UTF-8
+
+```cpp
+// Wrapped paragraph: the reported height matches what drawWrapped emits.
+float h = font.heightWrapped(desc, 300.0f, 1.0f);
+font.drawWrapped(batch, desc, {x, y}, 300.0f, 1.0f, forge::Color::white());
+
+// Clip a scrolling list to its panel (framebuffer pixels, bottom-left origin!)
+batch.setScissor({panelX, vp.y - panelY - panelH, panelW, panelH});
+font.drawWrapped(batch, longList, {panelX + 8, vp.y - panelY - 8}, panelW - 16, 0.8f, col);
+batch.clearScissor();
+
+// Any codepoint the TTF contains works; text is UTF-8.
+font.draw(batch, "héllo — 世界", pos, 1.0f, forge::Color::white());
+```
+
+For pixel-art fonts, `font.loadBitmapFnt("ui.fnt")` loads a BMFont text file
+plus its page PNG(s) and skips stb_truetype entirely.
+
+## Save/load a scene and prefabs
+
+```cpp
+forge::saveScene(scene, "save.json", &engine.assets());
+
+forge::Scene loaded;
+forge::SceneSaveStats stats;
+if (!forge::loadScene(loaded, "save.json", &engine.assets(), &stats))
+    FORGE_LOG_ERROR("load failed");
+// Script closures are code, not data: re-bind them by ScriptRef name.
+loaded.registry().view<forge::ScriptRef>([&](forge::Entity e, forge::ScriptRef& r) {
+    if (r.name == "player") loaded.registry().emplace<forge::Script>(e, makePlayerScript());
+});
+
+// Prefab: entity template with a position override.
+forge::Prefab bullet = forge::makePrefab(scene, bulletProto, "bullet");
+forge::savePrefab(bullet, "bullet.prefab.json");
+forge::Entity b = forge::instantiate(scene, bullet, spawnPos, &engine.assets());
+```
+
+Asset paths in the save resolve through the `AssetManager` search paths, so a
+save created in the repo root still loads from a build directory.
+
+## Scripted gameplay rules (hot reload)
+
+```cpp
+forge::script::ScriptVM vm;
+vm.bind("spawn", [&](const std::vector<forge::script::Value>& a) {
+    spawnEnemy(a.at(0).number(), a.at(1).number());
+    return forge::script::Value(true);
+});
+vm.loadFile("assets/rules.fgs");
+
+// per event
+auto score = vm.call("on_collect", forge::script::args(streak));
+if (!vm.error().ok()) FORGE_LOG_ERROR("%s", vm.error().str().c_str());
+
+// hot reload key
+if (input.pressed(forge::Key::F2)) vm.loadFile("assets/rules.fgs");
+```
+
+Rules live in `.fgs` text files (`fn on_collect(streak) { ... }`), so designers
+can tune scoring/objectives without a rebuild. Errors never throw: check
+`vm.error()` and keep the last good state.
+
+## Debug overlay (F1)
+
+```cpp
+forge::DebugOverlay overlay;
+overlay.init(&font);
+// in the HUD pass, after your own HUD:
+overlay.update(dt, forge::Profiler::instance(), batch);
+overlay.draw(batch, vp, &scene, &scene.physics());
+// input: overlay.handleInput(engine.input());
+```
+
+Draw it inside a centered Y-up screen pass. It needs real frame times to show
+a meaningful graph. No ImGui dependency, works on the web build.
+
+## Persisted key remaps
+
+```cpp
+auto& in = engine.input();
+in.bindKey("jump", forge::Key::Space);
+in.bindKey("jump", forge::Key::Z);
+in.bindPad("jump", forge::GamepadButton::A);
+in.loadBinds("binds.txt");        // player overrides, if the file exists
+
+// rebind UI: wait for a key press, then serialize
+if (in.pressed(forge::Key::F10)) in.saveBinds("binds.txt");
+```
+
+Format is one action per line (`jump=space,z,pad:a`); unknown tokens fail with
+`line N:` and leave the previous bindings untouched.
+
+## Touch input (mobile/web)
+
+```cpp
+for (const auto& t : in.touches()) {
+    forge::Vec2 world = cam.screenToWorld(t.pos, vp.x, vp.y);
+    if (t.id == 0) joystick = t.pos - t.start;    // or in.touchDrag(t.id)
+}
+if (in.touchPressed()) startGesture();
+if (in.touchReleased()) endGesture();
+```
+
+`Engine` fills this from SDL finger events (ids are stable per finger), and
+press/release latches follow the same window rules as keys, so a tap is never
+lost. Add `in.setStickDeadzone(0.22f)`/`setStickCurve(1.4f)` if you drive
+movement from a virtual stick.
+
 ## Profiler overlay
 
 ```cpp
@@ -428,25 +597,43 @@ for (auto e : spawned) { auto n = scene.create("child"); /* … */ }
 `Scene::update`'s script pass already snapshots entities, so `onUpdate`
 scripts *may* spawn/destroy (it re-checks aliveness between callbacks).
 
-## Saving a high score (no save system in the engine)
+## Saving a high score or settings
 
-Plain `FILE*`/`std::fstream` is the intended approach; there is no serialization
-API. Keep it small:
+Use `forge::json` (header-only, atomic writes) rather than a binary blob, so
+saves survive a version change and can be inspected by hand:
 
 ```cpp
-int loadBest(const char* path) {
-    std::FILE* f = std::fopen(path, "rb");
-    if (!f) return 0;
-    int v = 0; std::fread(&v, sizeof(v), 1, f); std::fclose(f);
-    return v > 0 ? v : 0;
-}
-void saveBest(const char* path, int v) {
-    if (std::FILE* f = std::fopen(path, "wb")) { std::fwrite(&v, sizeof(v), 1, f); std::fclose(f); }
-}
+forge::json::Value save = forge::json::Value::object();
+save.set("best", forge::json::Value(best));
+save.set("volume", forge::json::Value(0.8));
+forge::json::writeFile("settings.json", save, true);
+
+forge::json::ParseError err;
+auto v = forge::json::parseFile("settings.json", &err);
+if (err.ok()) best = v["best"].asInt(0);
 ```
 
-For anything structured, serialize fixed-size fields explicitly (platform
-endianness/ABI match is acceptable for same-machine saves).
+`writeFile` writes `<path>.tmp` then renames, so a crash cannot corrupt the
+previous file. For entity-level state use `saveScene`/`loadScene` instead (see
+above).
+
+## Letterboxing with a post pass and lights
+
+Order matters when you stack effects. The pipeline `10_lantern` uses:
+
+```text
+sceneFbo.bind()
+  batch.begin(cam.viewProj)  -> tilemap, entities, player
+  batch.end()
+  lights.render(batch, cam, vp, &sceneFbo)     // composite into sceneFbo
+unbind -> screen
+  fx.apply(sceneView, vp)                      // between passes
+  batch.begin(screen ortho) -> HUD text, overlay
+  batch.end()
+```
+
+Each stage owns its own `begin`/`end`; never leave a batch open across
+`lights.render` or `fx.apply`.
 
 ## Window resize-aware HUD
 

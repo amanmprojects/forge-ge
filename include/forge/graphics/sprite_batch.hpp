@@ -14,6 +14,9 @@
 
 namespace forge {
 
+class Texture2D;
+class Font;
+
 struct SpriteDraw {
     const Texture2D* tex = nullptr; // null = white
     Vec2 pos{0, 0};                 // center
@@ -57,6 +60,41 @@ public:
     void drawCircleOutline(Vec2 center, float radius, Color c, float thickness = 2.0f, int segments = 48);
     void drawLine(Vec2 a, Vec2 b, Color c, float thickness = 1.0f);
 
+    // Raw quad with four explicit corners (world/screen space, any winding).
+    // Useful for shadow volumes and custom geometry. Corners are in
+    // counter-clockwise order; UVs map the full texture (or the white tex).
+    void drawQuad(Vec2 a, Vec2 b, Vec2 c, Vec2 d, Color col = Color::white(),
+                  const Texture2D* tex = nullptr, Rect uv = {0, 0, 1, 1});
+
+    // --- UI helpers ---
+    // 9-slice: corners keep their pixel size, edges stretch. `border` is the
+    // corner size in texture pixels; src is the full pixel rect of the frame.
+    void drawNineSlice(const Texture2D& tex, Rect dst, Rect srcPixel, float border,
+                       Color c = Color::white());
+    // Panel: filled rounded-ish rect + outline + 9-slice background if given.
+    void drawPanel(Rect r, Color fill, Color border, float thickness = 2.0f);
+    // Text with a 1px shadow offset (cheap readability on busy backgrounds).
+    void drawTextShadow(const Font& font, const std::string& text, Vec2 pos,
+                        float scale, Color c, Color shadow = Color{0, 0, 0, 0.7f});
+
+    // --- blend modes ---
+    // Changing the mode flushes, so draws stay painter's-order. begin() resets
+    // to Alpha; end() restores the default alpha blend.
+    enum class BlendMode { Alpha, Additive, Multiply, None };
+    void setBlendMode(BlendMode m);
+    BlendMode blendMode() const { return blend_; }
+
+    // --- clipping ---
+    // Rect is in framebuffer pixels with a BOTTOM-LEFT origin (the same space
+    // as glScissor and Engine::viewport()); convert screen-space UI rects
+    // with y = viewportHeight - (rect.y + rect.h). Changing the scissor flushes
+    // the current batch, so draws stay painter's-order. begin() resets it to
+    // the whole target; end() disables it so no GL state leaks to your code.
+    void setScissor(Rect px);
+    void clearScissor();
+    bool scissorEnabled() const { return scissorOn_; }
+    Rect scissor() const { return scissorRect_; }
+
     // Stats for profiling HUD
     int drawCalls() const { return drawCalls_; }
     int quadsDrawn() const { return quadsDrawn_; }
@@ -83,6 +121,14 @@ private:
     // flushes into this target, not whatever happens to be bound later.
     uint32_t boundFbo_ = 0;
     int boundVp_[4] = {0, 0, 0, 0};
+
+    bool scissorOn_ = false;
+    Rect scissorRect_{0, 0, 0, 0};
+    bool scissorDirty_ = false; // apply before the next flush
+    bool scissorActive_ = false; // GL_SCISSOR_TEST currently enabled
+
+    BlendMode blend_ = BlendMode::Alpha;
+    BlendMode blendApplied_ = BlendMode::Alpha; // currently set in GL
 
     int drawCalls_ = 0;
     int quadsDrawn_ = 0;

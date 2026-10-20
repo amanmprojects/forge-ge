@@ -12,6 +12,11 @@
 // The bot thinks on a worker thread, so the board never freezes. Five levels
 // weaken it by sampling near-best moves (see chess::ai::levels).
 //
+// Pieces are 256px sprites from assets/ — one image per board square,
+// rasterized from the SVGs of amanmprojects/chess by assets/make_pieces.sh;
+// delete that folder and the game falls back to drawing simple silhouettes,
+// so it works with no assets at all.
+//
 // Headless capture:
 //   ./09_chess --shot out.png --frames 300 [--moves "e4 e5 Nf3"] [--fen FEN]
 //              [--level 3] [--title] [--size 1280x800]
@@ -64,7 +69,7 @@ constexpr float BOARD_SIZE = SQ * 8.0f;                 // 704
 constexpr float BOARD_X = 40.0f, BOARD_Y = 48.0f;
 constexpr float PANEL_X = BOARD_X + BOARD_SIZE + 20.0f; // 764
 constexpr float PANEL_W = FIELD_W - PANEL_X - 40.0f;    // 476
-constexpr float PANEL_H = BOARD_SIZE;
+
 
 // -------------------------------------------------------------------- palette
 const Color kBg = Color::fromHex(0x14161CFF);
@@ -171,9 +176,12 @@ static std::vector<uint8_t> synthWav(const std::vector<Note>& notes, int rate = 
     return wav;
 }
 
-// ------------------------------------------------------------ piece drawing
-// Every piece is drawn twice - a slightly larger silhouette in the outline
-// colour, then the body on top - which gives a clean rim without textures.
+// ------------------------------------------------- piece drawing (fallback)
+// Preferred path: textured 256px sprites from examples/chess/assets (see
+// make_pieces.sh), drawn by ChessGame::drawPiece below. These shapes are the
+// no-assets fallback: each piece is a slightly larger silhouette in the
+// outline colour with the body on top, which gives a clean rim without
+// textures.
 struct PiecePen {
     forge::SpriteBatch& b;
     Vec2 c;
@@ -266,7 +274,8 @@ static void pieceDetails(const PiecePen& p, int type) {
     }
 }
 
-static void drawPiece(forge::SpriteBatch& b, int type, int color, Vec2 center, float size) {
+static void drawPieceProcedural(forge::SpriteBatch& b, int type, int color, Vec2 center,
+                                float size) {
     if (type == chess::EMPTY) return;
     const bool white = color == chess::WHITE;
     const Color body = white ? kWhiteBody : kBlackBody;
@@ -411,7 +420,13 @@ public:
         loadFont(fontBig_, 54.0f, "FORGE_FONT_TITLE");
         loadFont(font_, 24.0f, "FORGE_FONT");
         loadFont(fontSmall_, 18.0f, "FORGE_FONT_SMALL");
+        loadPieceTextures();
         initAudio();
+#if FORGE_PLATFORM_WEB
+        // No worker threads in the browser (they need SharedArrayBuffer and
+        // cross-origin isolation): the bot searches inline, paced in update().
+        syncBot_ = true;
+#endif
         fitCamera(engine.viewport());
         mode_ = startInTitle_ ? Mode::Title : Mode::Play;
         if (mode_ == Mode::Title) attract_ = true;
@@ -461,6 +476,12 @@ public:
     // ---------------------------------------------------------------- loop
     void update(float dt) {
         uiTime_ += dt;
+#if FORGE_PLATFORM_WEB
+        // The inline bot search returns instantly, so hold it back a beat:
+        // without this the attract game behind the title would play one move
+        // per frame (and the bot would answer before you see your own move).
+        if (syncPace_ > 0.0f) syncPace_ -= dt;
+#endif
         auto& in = engine_->input();
         const forge::IVec2 vp = engine_->viewport();
         fitCamera(vp);
@@ -888,6 +909,9 @@ private:
     }
 
     void botPump() {
+#if FORGE_PLATFORM_WEB
+        if (syncPace_ > 0.0f) return; // still "thinking" (see update())
+#endif
         if (!botToMove()) return;
         const ai::Level& level = ai::levels()[(size_t)(level_ - 1)];
         const uint64_t moveSeed = seed_ + (uint64_t)records_.size() * 7919ull;
@@ -899,6 +923,9 @@ private:
             fixed.movetimeMs = 0.0;
             const ai::Result r = bot_.thinkSync(pos_, fixed, moveSeed);
             if (r.move != chess::MOVE_NONE) applyMove(r.move);
+#if FORGE_PLATFORM_WEB
+            syncPace_ = 0.6f;
+#endif
             return;
         }
         if (botState_ == BotState::Idle) {
@@ -998,12 +1025,12 @@ private:
             const int p = pos_.at(sq);
             if (p == chess::EMPTY) continue;
             if (dragging_ && sq == dragSq_) continue;
-            drawPiece(b, chess::typeOf(p), chess::colorOf(p), squareCenter(sq, flip_), SQ * 0.78f);
+            drawPiece(b, chess::typeOf(p), chess::colorOf(p), squareCenter(sq, flip_), SQ);
         }
         if (dragging_ && dragSq_ >= 0) {
             const int p = pos_.at(dragSq_);
             if (p != chess::EMPTY)
-                drawPiece(b, chess::typeOf(p), chess::colorOf(p), dragPos_, SQ * 0.86f);
+                drawPiece(b, chess::typeOf(p), chess::colorOf(p), dragPos_, SQ);
         }
 
         if (hintMove_ != chess::MOVE_NONE)
@@ -1133,8 +1160,8 @@ private:
             const float y = side == 0 ? rowTop : rowTop - 26.0f;
             for (int t : kOrder)
                 for (int i = 0; i < kFull[t] - have[side][t]; ++i) {
-                    drawPiece(b, t, side, {x + 11.0f, y}, 20.0f);
-                    x += 22.0f;
+                    drawTrophyPiece(b, t, {x + 11.0f, y}, 22.0f);
+                    x += 23.0f;
                 }
         }
         // Material balance, right-aligned on the top row (there is always room
@@ -1203,7 +1230,7 @@ private:
             const bool hot = r.contains(mouse_);
             b.drawRect(r, on ? kButtonOn : (hot ? kButtonHot : kButton));
             b.drawRectOutline(r, on ? kAccent : kPanelEdge, on ? 3.0f : 1.0f);
-            drawPiece(b, kTypes[i], pos_.turn(), {r.center().x, r.center().y + 8.0f}, 52.0f);
+            drawPiece(b, kTypes[i], pos_.turn(), {r.center().x, r.center().y + 8.0f}, 70.0f);
             textCentered(b, kKeys[i], {r.center().x, r.y + 15.0f}, 0.7f,
                          on ? kText : kTextDim);
         }
@@ -1351,6 +1378,9 @@ private:
     static bool loadFont(forge::Font& font, float px, const char* envKey) {
         std::vector<std::string> paths;
         if (const char* env = std::getenv(envKey)) paths.emplace_back(env);
+        // Shipped with the example so the web build has text (a browser has no
+        // system fonts); the desktop build picks it up too when it is there.
+        paths.emplace_back("examples/chess/assets/fonts/DejaVuSansMono-Bold.ttf");
         const char* system[] = {
             "/usr/share/fonts/TTF/DejaVuSansMono-Bold.ttf",
             "/usr/share/fonts/Adwaita/AdwaitaMono-Bold.ttf",
@@ -1390,10 +1420,58 @@ private:
         sfx_.ui = add({{800, 640, 0.020f, 0.22f, 1, 0.0f}});
     }
 
+    // ------------------------------------------------------------------ pieces
+    // Sprites are whole board squares (the web board's 45x45 canvas), so `box`
+    // is the square the piece is drawn into: identical framing to
+    // amanmprojects/chess, where the piece box is `inset: 0` in its square.
+    void drawPiece(forge::SpriteBatch& b, int type, int color, Vec2 center, float box) const {
+        if (type == chess::EMPTY) return;
+        if (const forge::Texture2D* tex = pieceTex_[color][type]) {
+            b.drawTexture(*tex, center, {box, box});
+            return;
+        }
+        drawPieceProcedural(b, type, color, center, box * 0.70f);
+    }
+
+    /** Captured-piece rows: the flat `tray` palette, like the web player strip. */
+    void drawTrophyPiece(forge::SpriteBatch& b, int type, Vec2 center, float box) const {
+        if (type == chess::EMPTY) return;
+        const forge::Texture2D* tex = pieceTex_[2][type];
+        if (!tex) {
+            drawPieceProcedural(b, type, chess::WHITE, center, box * 0.70f);
+            return;
+        }
+        b.drawTexture(*tex, center, {box, box}, 0.0f, {1.0f, 1.0f, 1.0f, 0.82f});
+    }
+
+    // Sprites live in examples/chess/assets (wK.png ... tK.png, generated by
+    // make_pieces.sh from the SVGs). Probed so ./build/09_chess from the repo
+    // root and ./09_chess from the build dir both work; AssetManager
+    // hot-reloads them if they change on disk.
+    void loadPieceTextures() {
+        static const char* files[3][7] = {
+            {nullptr, "wP.png", "wN.png", "wB.png", "wR.png", "wQ.png", "wK.png"},
+            {nullptr, "bP.png", "bN.png", "bB.png", "bR.png", "bQ.png", "bK.png"},
+            {nullptr, "tP.png", "tN.png", "tB.png", "tR.png", "tQ.png", "tK.png"},
+        };
+        static const char* dirs[] = {
+            "examples/chess/assets/", "../examples/chess/assets/",
+            "../../examples/chess/assets/",
+        };
+        for (int c = 0; c < 3; ++c)
+            for (int t = chess::PAWN; t <= chess::KING; ++t)
+                for (const char* dir : dirs) {
+                    const std::string path = std::string(dir) + files[c][t];
+                    if (fileExists(path) && (pieceTex_[c][t] = engine_->assets().loadTexture(path)))
+                        break;
+                }
+    }
+
     // -------------------------------------------------------------- fields
     forge::Engine* engine_ = nullptr;
     forge::Camera2D cam_;
     forge::Font fontBig_, font_, fontSmall_;
+    forge::Texture2D* pieceTex_[3][7] = {}; // [palette: w/b/tray][type]
     Vec2 mouse_{};
     int hoverSq_ = -1;
 
@@ -1407,6 +1485,7 @@ private:
     Mode mode_ = Mode::Play;
     bool attract_ = false;
     bool syncBot_ = false;
+    float syncPace_ = 0.0f; // web build: min. time between inline bot moves
     bool startInTitle_ = false;
     bool paused_ = false;
     bool flip_ = false;
@@ -1542,16 +1621,30 @@ int main(int argc, char** argv) {
         printUsage();
         return 0;
     }
-    const bool ci = std::getenv("CI") != nullptr;
-
     forge::EngineConfig cfg;
     cfg.fixedStep = 1.0f / 60.0f;
     cfg.window.vsync = args.shot.empty();
+#if FORGE_PLATFORM_WEB
+    // The window is the canvas: the field the game is drawn for, scaled by the
+    // page's CSS. A non-resizable canvas keeps the drawing buffer stable.
+    cfg.window.width = 1280;
+    cfg.window.height = 800;
+    cfg.window.resizable = false;
+#endif
+#if FORGE_PLATFORM_WEB
+    // Emscripten takes the frame loop over by unwinding main()'s stack, so the
+    // engine and the game must outlive main: keep them on the heap.
+    auto engineOwner = std::make_unique<forge::Engine>(cfg);
+    auto gameOwner = std::make_unique<ChessGame>();
+    forge::Engine& engine = *engineOwner;
+    ChessGame& game = *gameOwner;
+#else
     forge::Engine engine(cfg);
+    ChessGame game;
+#endif
     if (!engine.valid()) return 1;
     engine.window().setTitle("Forge 09_chess - rules + bot ported from amanmprojects/chess");
 
-    ChessGame game;
     game.setSeed(args.seed);
     game.setLevel(args.level);
     game.setFlip(args.flip);
@@ -1610,6 +1703,16 @@ int main(int argc, char** argv) {
     }
 
     // CI plays a whole game out by itself; the window shows normal play.
+#if FORGE_PLATFORM_WEB
+    // The page opens on the title card (the attract game plays behind it) and
+    // then hands over to the human. No frame cap: it runs until the tab closes.
+    game.setStartInTitle(true);
+    game.setAttract(false);
+    engine.runFixed(
+        [&](float dt) { game.update(dt); },
+        [&] { game.render(); });
+#else
+    const bool ci = std::getenv("CI") != nullptr;
     game.setAttract(args.attract || ci);
     game.setSyncBot(ci);
     const int frameLimit = args.frames > 0 ? args.frames : (ci ? 240 : 0);
@@ -1620,6 +1723,7 @@ int main(int argc, char** argv) {
             game.render();
             if (frameLimit > 0 && ++frames >= frameLimit) engine.quit();
         });
+#endif
     std::printf("chess: plies=%d level=%d over=%d %s sane=%d\n", game.plyCount(), game.levelIndex(),
                 game.over() ? 1 : 0, game.resultText().c_str(), game.healthy() ? 1 : 0);
     return game.healthy() ? 0 : 1;

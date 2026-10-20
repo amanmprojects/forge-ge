@@ -2,7 +2,7 @@
 
 Agent-oriented reference for the Forge engine. Written to be read by both
 humans and coding agents; every signature and behavior here was verified
-against the source in this repository (engine version 0.1.0).
+against the source in this repository (engine version 0.2.0).
 
 If you only read one file, read [`agents/10-pitfalls.md`](agents/10-pitfalls.md).
 If you are new to the codebase, start with
@@ -15,15 +15,16 @@ If you are new to the codebase, start with
 |---|---|
 | [`agents/00-overview.md`](agents/00-overview.md) | What is Forge? How is it structured? What are the world/coordinate/memory conventions? What happens each frame? |
 | [`agents/01-getting-started.md`](agents/01-getting-started.md) | How do I build it and get a window with moving things on screen? Which loop style do I need? |
-| [`agents/02-core.md`](agents/02-core.md) | `Engine` configuration, window, timing, input (keys/mouse/gamepads/actions), logging, profiling |
+| [`agents/02-core.md`](agents/02-core.md) | `Engine` configuration, window, timing, input (keys/mouse/gamepads/touch/IME/actions/remaps), logging, profiling |
 | [`agents/03-math.md`](agents/03-math.md) | All math types and helpers: vectors, rects, colors, RNG, easing, noise, narrowphase |
-| [`agents/04-graphics.md`](agents/04-graphics.md) | Batching, cameras, textures, fonts, offscreen targets, tilemaps, raw GL |
+| [`agents/04-graphics.md`](agents/04-graphics.md) | Batching, blend modes, scissor, cameras, textures, fonts (UTF-8/BMFont), offscreen + MSAA targets, tilemaps (multi-tileset/infinite/slopes), atlas packing, lighting, post-processing, skeletons, raw GL |
 | [`agents/05-animation-particles.md`](agents/05-animation-particles.md) | Sprite animation, tweens, particle systems |
-| [`agents/06-physics.md`](agents/06-physics.md) | The arcade AABB physics world: bodies, contacts, sensors, raycasts |
-| [`agents/07-scene-ecs.md`](agents/07-scene-ecs.md) | Entity/component registry and the `Scene` convenience pipeline |
-| [`agents/08-audio-assets.md`](agents/08-audio-assets.md) | Playing/decoding audio (including synthesized sounds), asset cache + hot reload |
+| [`agents/06-physics.md`](agents/06-physics.md) | The arcade physics world: bodies, filtering, contacts, sensors, one-way platforms, carry, joints, CCD, raycasts, debug draw |
+| [`agents/07-scene-ecs.md`](agents/07-scene-ecs.md) | Entity/component registry, the `Scene` pipeline, versioned scene save/load and prefabs |
+| [`agents/08-audio-assets.md`](agents/08-audio-assets.md) | Playing/decoding audio (including synthesized sounds and music crossfades), asset cache, search paths, shader/texture/font hot reload |
 | [`agents/09-recipes.md`](agents/09-recipes.md) | Copy-paste solutions: HUD, camera follow, pause, grid games, headless capture, CI, … |
 | [`agents/10-pitfalls.md`](agents/10-pitfalls.md) | Every known trap, its symptom, and the fix |
+| [`agents/11-scripting-tools.md`](agents/11-scripting-tools.md) | `forge::script` (`.fgs`), `forge::json`, `DebugOverlay`, and how they compose in `10_lantern` |
 
 ## Suggested reading paths
 
@@ -42,5 +43,5 @@ If you are new to the codebase, start with
 - "0-based" vs "1-based": tile ids are 1-based (`0` = empty); entity ids are
   generational handles (`0` = null).
 - Signatures are copied from headers; behavior notes were verified in `src/`.
-- The docs track version 0.1.0 — if the headers disagree, the headers win;
+- The docs track version 0.2.0 — if the headers disagree, the headers win;
   update the docs in the same change.

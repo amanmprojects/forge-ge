@@ -5,15 +5,17 @@ comes from the actual implementation, not the marketing.
 
 ## Engine and the frame loop
 
-### 1. `EngineConfig::window` does nothing (0.1.0)
+### 1. `EngineConfig::window` was ignored in 0.1.0 (fixed in 0.2.0)
 
-**Symptom:** `cfg.window.title/width/height/vsync` have no effect; the log says
-`Window 'Forge Game' 1280x720`.
-**Cause:** `Engine` default-constructs its `Window` member before applying the
-config, so `cfg.window` is never passed to `Window::create`.
-**Fix:** call `engine.window().setTitle("…")` after construction. Everything
-else in `EngineConfig` (`fixedStep`, `maxSteps`, `initAudio`, `quitOnEscape`,
-`maxFps`) works. Window is resizable + vsync-on by default.
+**Symptom (0.1.0 only):** `cfg.window.title/width/height/vsync` had no effect;
+the log said `Window 'Forge Game' 1280x720`.
+**Cause:** `Engine` default-constructed its `Window` before applying the
+config, so `cfg.window` never reached `Window::create`.
+**Fix:** upgrade. `Engine` now constructs the window from the config, and
+`engine.window().config()` / `title()` report what was applied. `setTitle()`
+still works at runtime. A window manager may override the requested size — use
+`engine.viewport()` (drawable pixels), never the configured width/height, for
+layout.
 
 ### 2. `endFrame()` after a failed `beginFrame`
 
@@ -368,6 +370,106 @@ and use `loadFile`.
 **Cause:** cached pointers are stable only until those calls.
 **Fix:** don't clear while anything holds pointers; unload explicitly when
 sure. Hot reload itself is safe (mutates in place).
+
+## New subsystems (0.2.0)
+
+### 44. Post-process output is upside down
+
+**Symptom:** `PostProcess::apply`/`FullscreenPass::apply` flips the image.
+**Cause:** `flipY` was passed `true` for a framebuffer texture. FBO color
+textures share the target's bottom-left origin, so no flip is needed.
+**Fix:** leave `flipY` at its default (`false`). Pass `true` only for a source
+that is genuinely top-down (e.g. a decoded PNG blitted with `stbi` row order).
+
+### 45. Text drawn after a post pass is mirrored/rotated
+
+**Symptom:** HUD glyphs look 180°-rotated when a post effect is on.
+**Cause:** the HUD was drawn with a **Y-down** ortho (`ortho(0,w,h,0)`) while
+the rest of the frame used Y-up. `Font::draw` treats `pos` as the top-left in
+Y-up space, so a flipped projection flips every glyph and reverses line order.
+**Fix:** use `engine.defaultProj()` (centered, Y-up) or
+`Mat4::ortho(-w/2, w/2, -h/2, h/2)` for HUD passes, and position text from the
+top with `y = h/2 - margin`.
+
+### 46. Slopes don't work on a physics body
+
+**Symptom:** the player sinks into a ramp or jitters on it.
+**Cause:** slopes live in `Tilemap`, not in `PhysicsWorld`. The box solver
+treats a slope tile as a full square.
+**Fix:** resolve tile collision with `Tilemap::collideRect` for slope levels
+(as `10_lantern` does) instead of adding the tilemap to the physics world.
+
+### 47. `applyAutotile` erases the map
+
+**Symptom:** after autotiling, every previously empty cell becomes a tile.
+**Cause:** `buildAutoRule(baseId, …)` returns `baseId` for neighbour mask 0
+("isolated tile"), so applying it to a layer that contains empty cells fills
+them.
+**Fix:** only autotile a dedicated layer that is already fully populated, or
+write a custom 256-entry rule whose `[0]` entry is `0`.
+
+### 48. A script "hangs" or silently does nothing
+
+**Symptom:** `vm.call()` returns null and nothing happens.
+**Cause:** errors never throw: a parse error, a missing function, or an
+exceeded step budget is reported through `vm.error()`.
+**Fix:** check `vm.error().ok()` after `loadFile`/`call`; the message carries
+the line/column. Top-level statements run once, lazily on the first `call()` —
+a script that only defines functions has no effect until you call one.
+
+### 49. `ScriptVM` state resets between loads
+
+**Symptom:** globals vanish after hot reload.
+**Cause:** `loadSource`/`loadFile` replace the program; `clear()` drops
+functions but keeps host bindings and globals, while a reload re-runs top-level
+statements.
+**Fix:** put tunables in globals you re-`setGlobal` after a reload, or read
+them from the script's own `on_reload()` function. `10_lantern` re-applies
+score/objective state after F2.
+
+### 50. Saved scene loses its behavior
+
+**Symptom:** entities load with the right sprite but don't move.
+**Cause:** `Script` holds a `std::function` (code) and is intentionally not
+serialized; only `ScriptRef{name}` is data.
+**Fix:** after `loadScene`, walk `view<ScriptRef>()` and `emplace<Script>` by
+name. Textures are stored by path and resolve through `AssetManager` search
+paths, so also `addSearchPath("assets")` if the save was made elsewhere.
+
+### 51. Lighting composite disappears when rendering to an FBO
+
+**Symptom:** the lightmap draws to the screen, but the `--shot` capture is
+unlit (or the next pass renders into the lightmap).
+**Cause:** `LightingSystem::render` rebinds the default framebuffer by default.
+**Fix:** pass the target explicitly — `lights.render(batch, cam, vp, &sceneFbo)`
+— and draw the HUD after the post pass, not between lighting and composite.
+
+### 52. Touch coordinates don't match the mouse
+
+**Symptom:** taps land at the wrong world position.
+**Cause:** `TouchPoint::pos` is in drawable pixels with a **top-left** origin,
+like `Input::mousePos()`, not world units.
+**Fix:** `cam.screenToWorld(t.pos, vp.x, vp.y)` exactly as for the mouse. On
+high-DPI windows, use `engine.viewport()` (drawable), not `window().size()`.
+
+### 53. Key remaps fail to load and bindings are unchanged
+
+**Symptom:** `loadBinds()` returns false and the game keeps its defaults.
+**Cause:** parsing is strict — an unknown action/source token aborts the whole
+file with `line N: …`.
+**Fix:** check the error string, and use the exact source grammar:
+`keyFromName` names, `mouse:left|right|middle|x1|x2`,
+`pad:a|b|x|y|back|guide|start|ls|rs|lb|rb|up|down|left|right`.
+
+### 54. BMFont text is offset or invisible
+
+**Symptom:** `loadBitmapFnt` succeeds but glyphs are misplaced or blank.
+**Cause:** BMFont offsets are measured from the **top** of the line, and page
+files are resolved relative to the `.fnt`, not the CWD. A missing page PNG
+leaves the font invalid.
+**Fix:** keep the `.fnt` and its page PNGs in the same folder, load with a path
+that exists (or via `AssetManager::resolve`), and remember `lineHeight()` comes
+from the file (`common lineHeight`), not from `pixelHeight * 1.25`.
 
 ## Numbers and sanity
 

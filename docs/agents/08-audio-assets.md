@@ -119,6 +119,12 @@ explicit AssetManager(AudioEngine* audio = nullptr);
 Texture2D* loadTexture(const std::string& path, TextureFilter = Linear);  // cached
 Font*      loadFont(const std::string& path, float pxHeight = 32.0f);     // cached per (path, px)
 SoundHandle loadSound(const std::string& path);                            // cached
+Shader*    loadShader(const std::string& vertPath, const std::string& fragPath); // cached
+
+void addSearchPath(const std::string& dir);
+void clearSearchPaths();
+const std::vector<std::string>& searchPaths() const;
+std::string resolve(const std::string& path) const;  // first existing candidate
 
 void unloadTexture(const std::string& path);
 void clear();                         // unload everything
@@ -134,8 +140,18 @@ size_t textureCount() const;
 - `loadTexture` failure returns `nullptr` (logged); `loadFont` likewise;
   `loadSound` returns an invalid handle when there's no audio engine or the
   decode fails.
+- **Search paths**: `addSearchPath("assets")` makes every relative load try
+  `assets/<path>` as well as `<path>` (in order, first existing file wins).
+  Absolute paths bypass the list. This is what lets the same binary run from
+  the repo root, from `build/`, or from an installed bundle. The cache key
+  stays the *logical* path, so `loadTexture("hero.png")` is the same entry no
+  matter which directory resolved it.
 - Hot reload covers textures, fonts **and sounds** (sounds re-decode into the
   same handle; playing voices keep their cursor).
+- **Shader hot reload**: `loadShader(vs, fs)` caches by the pair of paths and
+  reloads when either file's mtime changes. A failed recompile is logged and
+  the previous program keeps running — a typo never blanks a live game. This
+  is folded into the same 2 Hz `update()`.
 - `update()` stats files at most twice per second — cheap enough to leave
   enabled in shipping if you want live-reload; disable for zero syscalls:
   `engine.assets().setHotReload(false)`.

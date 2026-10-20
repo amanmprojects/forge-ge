@@ -1,7 +1,8 @@
 # 04 — Graphics
 
 Headers: `forge/graphics/sprite_batch.hpp`, `camera.hpp`, `texture.hpp`,
-`font.hpp`, `framebuffer.hpp`, `tilemap.hpp`, `shader.hpp`, `gl_loader.hpp`.
+`font.hpp`, `framebuffer.hpp`, `tilemap.hpp`, `shader.hpp`, `gl_loader.hpp`,
+`atlas.hpp`, `lighting.hpp`, `postprocess.hpp`, `skeleton.hpp`.
 
 ## SpriteBatch
 
@@ -32,6 +33,24 @@ class SpriteBatch {
                            float thickness = 2.0f, int segments = 48);
     void drawLine(Vec2 a, Vec2 b, Color c, float thickness = 1.0f);
 
+    // UI helpers
+    void drawNineSlice(const Texture2D& tex, Rect dst, Rect srcPixel, float border,
+                       Color c = Color::white());
+    void drawPanel(Rect r, Color fill, Color border, float thickness = 2.0f);
+    void drawTextShadow(const Font& font, const std::string& text, Vec2 pos,
+                        float scale, Color c, Color shadow = Color{0,0,0,0.7f});
+    void drawQuad(Vec2 a, Vec2 b, Vec2 c, Vec2 d, Color col = Color::white(),
+                  const Texture2D* tex = nullptr, Rect uv = {0, 0, 1, 1});
+
+    // Blend modes (flush on change; reset to Alpha by begin())
+    enum class BlendMode { Alpha, Additive, Multiply, None };
+    void setBlendMode(BlendMode m);
+    BlendMode blendMode() const;
+
+    // Scissor clipping: framebuffer pixels, bottom-left origin
+    void setScissor(Rect px);
+    void clearScissor();
+
     int  drawCalls() const;  int quadsDrawn() const;  void resetStats();
 };
 ```
@@ -46,9 +65,47 @@ class SpriteBatch {
 - Draw order is submission order (painter's algorithm). There is **no depth
   buffer use**; later quads cover earlier ones. Use it deliberately for
   layering, or `Sprite::layer`/`Scene::draw` (sorted).
-- Blending is `SRC_ALPHA, ONE_MINUS_SRC_ALPHA`, enabled once at init. There is
-  no additive blend mode — premultiplied-style bright effects are done with
-  color choice (see `08_snake`'s glows).
+- Blending defaults to `SRC_ALPHA, ONE_MINUS_SRC_ALPHA` and is re-applied by
+  `begin()`. Use `setBlendMode` for additive glows (`Additive`), shadow
+  darkening (`Multiply`) or stencil-like masking (`None`). A mode change
+  flushes, so group draws by mode. `end()` restores alpha blending so raw GL
+  code after the pass sees sane state.
+
+### Scissor clipping
+
+```cpp
+batch.setScissor({x, y, w, h});   // framebuffer pixels, BOTTOM-LEFT origin
+batch.drawPanel(panel, fill, border);
+batch.clearScissor();
+```
+
+The rect is in framebuffer pixels (not world, not screen-centered), which is
+what `glScissor` wants — so a HUD panel at screen y=20 from the top needs
+`fbH - y - h`. `setScissor` flushes first (already-submitted quads keep their
+own clipping), `begin()` resets to off, and `end()` disables `GL_SCISSOR_TEST`
+so nothing leaks into a following FBO pass or raw GL. Negative widths are
+normalized. A scissor is clipped against the current viewport by GL itself, so
+it works identically for the window and for an FBO.
+
+### Blend modes and UI primitives
+
+```cpp
+batch.setBlendMode(SpriteBatch::BlendMode::Additive);
+batch.drawCircle(glowPos, 40, Color{1, 0.8f, 0.3f, 0.5f});
+batch.setBlendMode(SpriteBatch::BlendMode::Alpha);
+
+batch.drawPanel({10, 10, 300, 120}, Color{0.05f, 0.06f, 0.09f, 0.9f},
+                Color{1, 1, 1, 0.15f}, 2.0f);
+batch.drawNineSlice(uiTex, {x, y, 240, 80}, {0, 0, 48, 48}, 16.0f);
+batch.drawTextShadow(font, "PAUSED", center, 2.0f, Color::white());
+```
+
+`drawNineSlice` takes a **pixel** source rect and a border width in pixels; it
+emits nine quads so corners never stretch. `drawPanel` is the zero-asset
+equivalent (fill + inset outline). `drawQuad` is the raw escape hatch: four
+arbitrary corners with one UV rect — useful for ramps, trails, gradient
+strips and custom deformations (the quad is two triangles, so non-planar
+corners in 2D are fine).
 
 ### Flush rules
 
@@ -106,6 +163,7 @@ texture, so they mix freely with sprites and text without extra state changes.
 ```cpp
 forge::Framebuffer fb;
 fb.create(640, 480);          // RGBA8 + depth-less FBO, CLAMP + LINEAR
+fb.create(640, 480, 4);       // 4x MSAA (renderbuffer + resolve target)
 
 fb.bind();                    // binds FBO and sets viewport to 640×480
 engine.clear(0.0f, 0.0f, 0.0f);
@@ -115,6 +173,30 @@ game.draw(batch);
 batch.end();                  // flush happens while the FBO is bound
 forge::Framebuffer::unbind(engine.viewport().x, engine.viewport().y); // back to screen
 ```
+
+```cpp
+class Framebuffer {
+    bool create(int w, int h, int samples = 0);   // 0, 2, 4, 8
+    bool resize(int w, int h);                    // keeps the sample count
+    void destroy();  bool valid() const;
+    void bind() const;                            // sets viewport to w×h
+    static void unbind(int vpW, int vpH);         // back to the screen
+    void resolve() const;                         // MSAA -> texture (no-op otherwise)
+    bool readPixels(std::vector<uint8_t>& out) const; // RGBA8, bottom-up rows
+    uint32_t texture() const;  int width() const;  int height() const;
+    int samples() const;  bool multisampled() const;
+};
+```
+
+- With `samples > 0`, `bind()` targets the multisampled FBO; the sampleable
+  texture only receives the content on `resolve()` (which `readPixels()` calls
+  for you). A driver that rejects the sample count silently falls back to a
+  non-MSAA target, so always check `multisampled()` in tests.
+- `resize()` recreates both attachments and keeps the sample count; existing
+  `Texture2D` views of `texture()` must be re-adopted (`adoptRaw`).
+- `Texture2D::adoptRaw(id, w, h, owns=false)` wraps a GL id you don't own
+  (an FBO color texture) so you can pass it to `SpriteBatch`/`PostProcess`.
+  Never let an owning `Texture2D` and an FBO share the id — use `owns=false`.
 
 `begin()` captures the current framebuffer + viewport, so even a mistaken
 un-ended batch flushes into the right target. The FBO's color texture is
@@ -237,27 +319,54 @@ const char* candidates[] = {
 
 ## Tilemap
 
-CSV or Tiled-JSON tile layers, with culling, per-id solid flags and rect
-collision. Y-up, tile `(0,0)` is the **bottom-left**.
+CSV or Tiled-JSON tile layers, with culling, multi-tileset support, flip
+flags, infinite maps, object layers, per-layer parallax, autotiling, slopes,
+per-id solid flags and rect collision. Y-up, tile `(0,0)` is the
+**bottom-left**.
 
 ```cpp
 void create(int w, int h, int tileW, int tileH);      // one empty "main" layer
 int  addLayer(const std::string& name);               // returns layer index
 bool loadCsv(const std::string& csv, int w, int h, int tileW, int tileH);
-bool loadTiledJson(const std::string& path);          // setTileset() afterwards
+bool loadTiledJson(const std::string& path);          // tilesets not loaded yet
+int  loadTilesets();                                  // load every referenced image
 
-void setTileset(const Texture2D* tex, int columns, int tileCount);
+void setTileset(const Texture2D* tex, int columns, int tileCount); // legacy/1 set
+void setTilesetTexture(int i, const Texture2D* tex);  // after loadTiledJson
+const std::vector<TilesetRef>& tilesets() const;
+int  tilesetFor(int localId) const;
+
 void setTile(int layer, int x, int y, int id);        // id is 1-based; 0 clears
-int  tile(int layer, int x, int y) const;
+void setTileFlags(int layer, int x, int y, uint8_t flags); // 1=H 2=V 4=diagonal
+int  tile(int layer, int x, int y) const;             // within-tileset id
+int  tilesetIndex(int layer, int x, int y) const;
+uint8_t tileFlags(int layer, int x, int y) const;
+
+// per-layer presentation
+TileLayer& layer(int i);  int layerCount() const;
+//   name, visible, opacity, offset, parallax
 
 void setSolid(int tileId, bool solid = true);         // per-id flag, any layer
 bool isSolid(int tileId) const;
+void setSlope(int tileId, float leftHeight, float rightHeight); // 0..1 of tileH
+void clearSlope(int tileId);
+TileSlope slope(int tileId) const;  bool isSlope(int tileId) const;
+float slopeSurfaceHeight(int tileId, float t) const;
+float surfaceYAt(int layer, int x, int y, float worldX) const;
 std::vector<Rect> solidsInRect(Rect r) const;         // world AABBs
 bool collideRect(Rect r, Vec2* resolve = nullptr) const; // hit + total push-out
+
+// autotiling
+void setAutoRule(const std::vector<int>& byMask);     // 256 entries, 0 = empty
+void applyAutotile(int layer);
+static std::vector<int> buildAutoRule(int baseId, int cornersId = 0,
+                                      int edgesId = 0, int innerId = 0);
 
 void draw(SpriteBatch&, Vec2 origin, Rect view) const;  // culled to view
 void drawAll(SpriteBatch&, Vec2 origin) const;
 Vec2 worldSize() const;
+Vec2 originOffset() const;                             // infinite maps only
+const std::vector<TilemapObject>& objects() const;
 ```
 
 Format notes:
@@ -265,16 +374,41 @@ Format notes:
 - **CSV**: a flat comma list, row-major with **row 0 = bottom** (Y-up). Values
   are 1-based ids, `0` empty. `loadCsv` reads at most `w*h` values and returns
   false if fewer were present.
-- **Tiled JSON**: only the **first tileset** is used; its image path is
-  exposed via `tilesetPath()` for you to load; `firstgid` is remapped to local
-  1-based ids; Tiled's top-down rows are flipped to Y-up on load; tile
-  flip/diagonal flags are **masked (ignored)**; a tileset tile size that
-  differs from the map tile size is rejected with a log error. You must call
-  `setTileset(&texture, columns, tileCount)` with the loaded image before
-  drawing (columns = tiles per row in the sheet).
+- **Tiled JSON**: every tileset is kept (`firstgid` per set, resolved lazily).
+  Tiled's top-down rows are flipped to Y-up on load. Flip/diagonal flags are
+  preserved per tile (`tileFlags`, decoded by the renderer and exposed for
+  gameplay if needed). A tileset tile size that differs from the map tile
+  size is rejected with a log error.
+- **Multi-tileset encoding**: a tile's id packs the tileset index in the high
+  16 bits, so `tile()` returns the within-tileset id and `tilesetIndex()`
+  tells you which sheet. Solid/slope rules therefore apply uniformly across
+  sheets (`setSolid(3)` marks tile 3 in *every* tileset).
+- **Infinite maps**: chunked `data` is expanded into dense bounds and
+  `originOffset()` reports where world `(0,0)` sits relative to tile `(0,0)`
+  (may be negative). Rendering, `solidsInRect` and `collideRect` all include
+  the offset.
+- **Object layers**: rectangles and points become `TilemapObject{name, type,
+  point, rect, properties}` with Tiled's top-down Y converted to Y-up. Use
+  them for spawn points, triggers and lights instead of parsing JSON twice.
+- **Layers**: each has `visible`, `opacity`, `offset` and `parallax` (a
+  multiplier applied around the camera in `draw`). Hiding a layer is purely
+  visual — solids stay solid.
 - `setSolid(id)` marks a tile id solid for `solidsInRect`/`collideRect` on
   **all layers**; layer visibility does not affect solids (hiding a collision
   layer does not open walls).
+- **Autotiling**: `buildAutoRule` gives a simple 3-level rule (isolated →
+  base, edges → edges, interior → inner); write your own 256-entry table for
+  a real tileset. `applyAutotile(layer)` rewrites that layer from its
+  non-empty neighbour mask. Do **not** apply it to a floor layer that is
+  already fully populated — `rule[0]` is the "no neighbours" result.
+- **Slopes**: `setSlope(id, left, right)` marks a tile solid and gives it a
+  linear surface, where the heights are fractions of the tile height (0 =
+  bottom, 1 = top). `(0, 1)` is a 45° ramp rising to the right; `(0.25, 0.75)`
+  is a gentler one. `collideRect` resolves slope tiles **vertically only**,
+  against the surface under the rect's horizontal center, and only pushes up
+  (so walking up from below never traps you). Everything else still treats a
+  slope tile as a full box for broadphase. `surfaceYAt`/`slopeSurfaceHeight`
+  let platformer code place feet exactly on the ramp.
 - `collideRect` returns true when `r` overlaps any solid, and writes the
   **sum of per-tile push-outs** into `resolve` (each tile contributes its
   smallest-axis MTV). Apply it yourself:
@@ -292,6 +426,161 @@ for an exact resolution (2 iterations is plenty for single-tile-thick walls).
 
 - `draw` culls to a world-space `view` rect (usually the camera's visible
   rect), keyed off `origin` = world position of tile (0,0).
+
+## AtlasPacker
+
+A CPU-side shelf/skyline packer. No image decoding, no GL: you feed sizes (or
+pixel rects), pack, blit your own pixels, then upload once.
+
+```cpp
+forge::AtlasPacker packer(1024, 1024, /*padding=*/2);
+int a = packer.add(64, 32, "hero");
+int b = packer.add(32, 32, "coin");
+if (packer.pack()) {
+    forge::Rect r = packer.rect(a);            // top-left pixel rect
+    packer.blit(a, rgba.data(), 64, 32);       // copies into pixels()
+    forge::Texture2D atlas;
+    atlas.loadMemory(packer.pixels().data(), packer.width(), packer.height(), 4);
+}
+```
+
+- `add` returns `-1` immediately when the entry can never fit the page; a
+  layout where placed entries overflow makes `pack()` return false (entries
+  never overlap — that is the invariant tests rely on).
+- `padding` is a transparent gutter between entries, so linear filtering at
+  tile edges cannot bleed neighbours.
+- `occupancy()` reports packed area / page area; `indexOf(name)` and
+  `name(i)` give you a stable name → index mapping for a loader.
+- `pixels()` is RGBA8, transparent where nothing was packed, and top-down
+  like the rest of the engine's image helpers.
+
+## LightingSystem
+
+2D lighting without normal maps. Lights are accumulated additively into an
+offscreen lightmap that starts at the ambient color, then the lightmap is
+**multiplied** over the already-drawn scene: white = unchanged, black = dark.
+
+```cpp
+forge::LightingSystem lights;
+lights.init(vp.x, vp.y);                 // owns a viewport-sized FBO
+lights.setAmbient(forge::Color::fromHex(0x202030FF));
+
+forge::Light2D torch;
+torch.pos = {120, 60};
+torch.radius = 220;
+torch.color = forge::Color::fromHex(0xFFD9A0FF);
+torch.intensity = 1.0f;
+torch.flickerAmount = 0.08f;             // deterministic, time-based
+torch.flickerSpeed = 8.0f;
+lights.addLight(torch);
+
+// per frame, AFTER the world batch has ended:
+lights.update(dt);
+lights.render(batch, cam, vp);           // composites over the screen
+```
+
+- `render` begins and ends its own passes, so call it between batch passes
+  (world pass ended, HUD pass not started).
+- `target` (optional 4th argument) re-binds an offscreen framebuffer after the
+  lightmap pass — required when the scene was rendered into an FBO (post-
+  processing pipeline, `--shot` capture).
+- Shadows are opt-in per light: `light.shadows = true` plus
+  `addOccluder(a, b)` line segments. Shadow volumes are drawn as black
+  polygons after the lights, so they also darken the ambient term.
+- `flickerAmount`/`flickerSpeed`/`flickerPhase` are applied at draw time from
+  the `update(dt)` clock; `Light2D::intensity` stays the authored value, so
+  rebuilding the light list every frame is safe.
+- `resize()` on window changes; `clearLights()` per frame if your lights move.
+  `lightmapTexture()` exposes the raw lightmap for custom compositing.
+- Cost is one extra FBO and one fullscreen multiply; the radial falloff
+  texture is generated once (128²) and shared by every light.
+
+## Post-processing and render targets
+
+```cpp
+forge::PostProcess fx;
+fx.init(forge::PostProcess::Effect::Vignette);
+fx.setVignette(0.6f, 0.7f);   // strength, radius
+fx.setScanlines(0.15f);
+fx.setTime(t);
+
+// render the world into an offscreen target first
+forge::Framebuffer scene;
+scene.create(vp.x, vp.y);
+scene.bind();
+/* ...world batch pass... */
+forge::Framebuffer::unbind(vp.x, vp.y);
+
+forge::Texture2D view;
+view.adoptRaw(scene.texture(), scene.width(), scene.height(), false);
+fx.apply(view, vp);            // between batch passes
+```
+
+- `apply` must run **between** `SpriteBatch` passes: it binds its own program,
+  VAO and texture, and disables blending/scissor. Re-`begin()` the batch after.
+- `flipY` defaults to `false` because framebuffer textures have the same
+  bottom-left origin as the target. Pass `true` only for a top-down image
+  source (e.g. a decoded PNG used as a background).
+- `FullscreenPass` is the raw version: `load(vert, frag)`, `setFloat/Vec2/Vec4/
+  Int`, then `apply(src, viewport)`. Use it for custom effects (bloom, palette
+  swap, screen shake warp); the built-in `PostProcess` is just a preset.
+- `RenderTargetStack` pools framebuffers: `push(w, h)` binds a target and
+  returns its `Texture2D&`, `pop(screenW, screenH)` restores the previous one
+  (or the screen) and returns the popped texture. Use it instead of manually
+  tracking nested FBOs.
+- Draw the HUD **after** the post pass so UI text stays crisp — that is what
+  `10_lantern` does.
+
+## Skeletal animation
+
+Bones + slots + keyframe tracks, loaded from JSON via `utils/json.hpp`.
+
+```cpp
+forge::Skeleton skel;
+if (skel.loadJson("hero.skel.json")) {
+    // Slot textures are resolved by name; the skeleton never owns them.
+    skel.resolveTextures([&](const std::string& name) {
+        return engine.assets().loadTexture("assets/" + name + ".png");
+    });
+    skel.play("walk");
+
+    // per frame:
+    skel.update(dt);                       // sample tracks, restore rest pose
+    skel.draw(batch, heroPos, 0.0f, {1, 1}, /*flipX=*/facing < 0);
+    if (debug) skel.debugDraw(batch, heroPos);
+}
+```
+
+```cpp
+bool loadJson(const std::string& path);
+bool parseJson(const std::string& text, const std::string& sourceName = "<memory>");
+bool valid() const;
+
+int  addBone(const Bone&);  int findBone(const std::string& name) const;
+int  addSlot(const Slot&);  int findSlot(const std::string& name) const;
+bool setSlotTexture(const std::string& slotName, const Texture2D* tex);
+
+int  addAnimation(const Animation&);  int findAnimation(const std::string&) const;
+bool play(const std::string& name, bool restart = true);  void stop();
+void setSpeed(float s);  bool playing() const;  const std::string& currentAnimation() const;
+
+void update(float dt);      // advance + recompute world transforms
+void applyPose();           // recompute transforms without advancing
+void draw(SpriteBatch&, Vec2 origin, float rotation = 0, Vec2 scale = {1,1},
+          bool flipX = false) const;
+void debugDraw(SpriteBatch&, Vec2 origin, float rotation = 0, Vec2 scale = {1,1}) const;
+```
+
+- Bone hierarchy is parent-first; `update()` restores `restPos/restRotation/
+  restScale` before sampling, so removing a track snaps back instead of
+  accumulating. `applyPose()` is for building a pose without advancing time
+  (e.g. an editor or a paused frame).
+- Tracks interpolate translation, rotation and scale linearly between keys;
+  times are seconds and loop with the clip duration (`Animation::loop`).
+- Slots draw in `drawOrder`, each as one quad with the slot's UV rect. There is
+  no mesh deformation (no free-form/skinned vertices) — that is a non-goal for
+  the arcade-grade engine.
+- `debugDraw` draws bone lines and joint dots; use it while authoring JSON.
 
 ## Shader and the GL loader
 

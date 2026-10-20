@@ -1,6 +1,10 @@
 #include "forge/core/input.hpp"
 #include <SDL3/SDL.h>
 #include <cstring>
+#include <cstdio>
+#include <cctype>
+#include <string_view>
+#include <utility>
 
 namespace forge {
 
@@ -28,6 +32,10 @@ void Input::endFrame() {
     std::memset(padPressLatch_, 0, sizeof(padPressLatch_));
     std::memset(padReleaseLatch_, 0, sizeof(padReleaseLatch_));
     textBuf_.clear();
+    composition_.clear();
+    compositionCursor_ = -1;
+    touchPressLatch_ = false;
+    touchReleaseLatch_ = false;
 }
 
 void Input::handleWindowEvent() {}
@@ -192,6 +200,249 @@ int Input::padCount() const {
 
 void Input::pushText(const char* utf8) { if (utf8) textBuf_ += utf8; }
 std::string Input::consumeText() { std::string t = std::move(textBuf_); textBuf_.clear(); return t; }
+
+// ------------------------------------------------------------------- touch
+const Input::TouchPoint* Input::touch(int64_t id) const {
+    for (auto& t : touches_)
+        if (t.id == id) return &t;
+    return nullptr;
+}
+
+void Input::touchDown(int64_t id, Vec2 pos, float pressure) {
+    for (auto& t : touches_) {
+        if (t.id == id) { t.pos = pos; t.pressure = pressure; return; }
+    }
+    touches_.push_back(TouchPoint{id, pos, pos, pressure});
+    touchPressLatch_ = true;
+}
+
+void Input::touchMove(int64_t id, Vec2 pos, float pressure) {
+    for (auto& t : touches_) {
+        if (t.id == id) { t.pos = pos; t.pressure = pressure; return; }
+    }
+    // A move without a down (missed event) is treated as a down.
+    touchDown(id, pos, pressure);
+}
+
+void Input::touchUp(int64_t id) {
+    for (size_t i = 0; i < touches_.size(); ++i) {
+        if (touches_[i].id == id) {
+            touches_.erase(touches_.begin() + (ptrdiff_t)i);
+            touchReleaseLatch_ = true;
+            return;
+        }
+    }
+}
+
+void Input::touchCancel(int64_t id) { touchUp(id); }
+
+Vec2 Input::touchDrag(int64_t id) const {
+    const TouchPoint* t = touch(id);
+    return t ? t->pos - t->start : Vec2{0, 0};
+}
+
+// ---------------------------------------------------------- action remaps
+namespace {
+
+const char* keyName(Key k) {
+    switch (k) {
+        case Key::Space: return "space";
+        case Key::Escape: return "escape";
+        case Key::Enter: return "enter";
+        case Key::Tab: return "tab";
+        case Key::Backspace: return "backspace";
+        case Key::Up: return "up";
+        case Key::Down: return "down";
+        case Key::Left: return "left";
+        case Key::Right: return "right";
+        case Key::LeftShift: return "lshift";
+        case Key::RightShift: return "rshift";
+        case Key::LeftCtrl: return "lctrl";
+        case Key::RightCtrl: return "rctrl";
+        case Key::LeftAlt: return "lalt";
+        case Key::RightAlt: return "ralt";
+        default: break;
+    }
+    int i = (int)k;
+    if (i >= (int)Key::N0 && i <= (int)Key::N9) {
+        static const char* digits[] = {"0", "1", "2", "3", "4", "5", "6", "7", "8", "9"};
+        return digits[i - (int)Key::N0];
+    }
+    if (i >= (int)Key::F1 && i <= (int)Key::F12) {
+        static const char* fkeys[] = {"f1", "f2", "f3", "f4", "f5", "f6",
+                                      "f7", "f8", "f9", "f10", "f11", "f12"};
+        return fkeys[i - (int)Key::F1];
+    }
+    // The enum's letter block is not alphabetical, so map explicitly.
+    static const std::pair<Key, const char*> letters[] = {
+        {Key::A, "a"}, {Key::B, "b"}, {Key::C, "c"}, {Key::D, "d"}, {Key::E, "e"},
+        {Key::F, "f"}, {Key::G, "g"}, {Key::H, "h"}, {Key::I, "i"}, {Key::J, "j"},
+        {Key::K, "k"}, {Key::L, "l"}, {Key::M, "m"}, {Key::N, "n"}, {Key::O, "o"},
+        {Key::P, "p"}, {Key::Q, "q"}, {Key::R, "r"}, {Key::S, "s"}, {Key::T, "t"},
+        {Key::U, "u"}, {Key::V, "v"}, {Key::W, "w"}, {Key::X, "x"}, {Key::Y, "y"},
+        {Key::Z, "z"}};
+    for (const auto& [key, name] : letters)
+        if (key == k) return name;
+    return "unknown";
+}
+
+const char* mouseName(MouseButton b) {
+    switch (b) {
+        case MouseButton::Left: return "left";
+        case MouseButton::Right: return "right";
+        case MouseButton::Middle: return "middle";
+        case MouseButton::X1: return "x1";
+        case MouseButton::X2: return "x2";
+    }
+    return "left";
+}
+
+bool mouseFromName(const std::string& s, MouseButton& out) {
+    if (s == "left") { out = MouseButton::Left; return true; }
+    if (s == "right") { out = MouseButton::Right; return true; }
+    if (s == "middle") { out = MouseButton::Middle; return true; }
+    if (s == "x1") { out = MouseButton::X1; return true; }
+    if (s == "x2") { out = MouseButton::X2; return true; }
+    return false;
+}
+
+const char* padName(GamepadButton b) {
+    switch (b) {
+        case GamepadButton::A: return "a";
+        case GamepadButton::B: return "b";
+        case GamepadButton::X: return "x";
+        case GamepadButton::Y: return "y";
+        case GamepadButton::Back: return "back";
+        case GamepadButton::Guide: return "guide";
+        case GamepadButton::Start: return "start";
+        case GamepadButton::LeftStick: return "ls";
+        case GamepadButton::RightStick: return "rs";
+        case GamepadButton::LeftShoulder: return "lb";
+        case GamepadButton::RightShoulder: return "rb";
+        case GamepadButton::DpadUp: return "up";
+        case GamepadButton::DpadDown: return "down";
+        case GamepadButton::DpadLeft: return "left";
+        case GamepadButton::DpadRight: return "right";
+        default: return "a";
+    }
+}
+
+bool padFromName(const std::string& s, GamepadButton& out) {
+    if (s == "a") { out = GamepadButton::A; return true; }
+    if (s == "b") { out = GamepadButton::B; return true; }
+    if (s == "x") { out = GamepadButton::X; return true; }
+    if (s == "y") { out = GamepadButton::Y; return true; }
+    if (s == "back") { out = GamepadButton::Back; return true; }
+    if (s == "guide") { out = GamepadButton::Guide; return true; }
+    if (s == "start") { out = GamepadButton::Start; return true; }
+    if (s == "ls") { out = GamepadButton::LeftStick; return true; }
+    if (s == "rs") { out = GamepadButton::RightStick; return true; }
+    if (s == "lb") { out = GamepadButton::LeftShoulder; return true; }
+    if (s == "rb") { out = GamepadButton::RightShoulder; return true; }
+    if (s == "up") { out = GamepadButton::DpadUp; return true; }
+    if (s == "down") { out = GamepadButton::DpadDown; return true; }
+    if (s == "left") { out = GamepadButton::DpadLeft; return true; }
+    if (s == "right") { out = GamepadButton::DpadRight; return true; }
+    return false;
+}
+
+} // namespace
+
+std::string Input::serializeBinds() const {
+    std::string out;
+    for (const auto& [action, b] : binds_) {
+        out += action;
+        out += '=';
+        bool first = true;
+        auto sep = [&] { if (!first) out += ','; first = false; };
+        for (Key k : b.keys) { sep(); out += keyName(k); }
+        for (auto m : b.mouse) { sep(); out += "mouse:"; out += mouseName(m); }
+        for (auto p : b.pad) { sep(); out += "pad:"; out += padName(p); }
+        out += '\n';
+    }
+    return out;
+}
+
+bool Input::deserializeBinds(const std::string& text, std::string* error) {
+    std::unordered_map<std::string, Binds> parsed;
+    size_t pos = 0;
+    int lineNo = 0;
+    while (pos <= text.size()) {
+        size_t end = text.find('\n', pos);
+        std::string line = text.substr(pos, end == std::string::npos ? std::string::npos : end - pos);
+        pos = end == std::string::npos ? text.size() + 1 : end + 1;
+        ++lineNo;
+        // trim
+        size_t a = line.find_first_not_of(" \t\r");
+        if (a == std::string::npos) continue;
+        size_t z = line.find_last_not_of(" \t\r");
+        line = line.substr(a, z - a + 1);
+        if (line.empty() || line[0] == '#') continue;
+        size_t eq = line.find('=');
+        if (eq == std::string::npos) {
+            if (error) *error = "line " + std::to_string(lineNo) + ": expected action=bindings";
+            return false;
+        }
+        std::string action = line.substr(0, eq);
+        Binds b;
+        std::string rest = line.substr(eq + 1);
+        size_t sp = 0;
+        while (sp <= rest.size()) {
+            size_t comma = rest.find(',', sp);
+            std::string item = rest.substr(sp, comma == std::string::npos ? std::string::npos : comma - sp);
+            sp = comma == std::string::npos ? rest.size() + 1 : comma + 1;
+            if (item.empty()) continue;
+            if (item.rfind("mouse:", 0) == 0) {
+                MouseButton m;
+                if (!mouseFromName(item.substr(6), m)) {
+                    if (error) *error = "line " + std::to_string(lineNo) + ": unknown mouse button '" + item + "'";
+                    return false;
+                }
+                b.mouse.push_back(m);
+            } else if (item.rfind("pad:", 0) == 0) {
+                GamepadButton p;
+                if (!padFromName(item.substr(4), p)) {
+                    if (error) *error = "line " + std::to_string(lineNo) + ": unknown pad button '" + item + "'";
+                    return false;
+                }
+                b.pad.push_back(p);
+            } else {
+                Key k = keyFromName(item);
+                if (k == Key::Unknown) {
+                    if (error) *error = "line " + std::to_string(lineNo) + ": unknown key '" + item + "'";
+                    return false;
+                }
+                b.keys.push_back(k);
+            }
+        }
+        parsed[action] = std::move(b);
+    }
+    binds_ = std::move(parsed);
+    return true;
+}
+
+bool Input::saveBinds(const std::string& path) const {
+    std::FILE* f = std::fopen(path.c_str(), "wb");
+    if (!f) return false;
+    std::string text = serializeBinds();
+    bool ok = std::fwrite(text.data(), 1, text.size(), f) == text.size();
+    std::fclose(f);
+    return ok;
+}
+
+bool Input::loadBinds(const std::string& path, std::string* error) {
+    std::FILE* f = std::fopen(path.c_str(), "rb");
+    if (!f) {
+        if (error) *error = "cannot open " + path;
+        return false;
+    }
+    std::string text;
+    char buf[4096];
+    size_t n;
+    while ((n = std::fread(buf, 1, sizeof(buf), f)) > 0) text.append(buf, n);
+    std::fclose(f);
+    return deserializeBinds(text, error);
+}
 
 void Input::bindKey(const std::string& action, Key k) { binds_[action].keys.push_back(k); }
 void Input::bindMouse(const std::string& action, MouseButton b) { binds_[action].mouse.push_back(b); }

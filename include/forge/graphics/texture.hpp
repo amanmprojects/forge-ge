@@ -27,6 +27,9 @@ public:
     bool loadMemory(const uint8_t* data, int w, int h, int channels,
                     TextureFilter filter = TextureFilter::Linear,
                     TextureWrap wrap = TextureWrap::Clamp);
+    // Replace a sub-rectangle of an existing texture (glyph atlas updates).
+    // Pixels are RGBA/RGB/alpha rows, top-left origin, tightly packed.
+    bool updateRegion(const uint8_t* data, int x, int y, int w, int h, int channels);
     // Procedural solid / checker / circle for prototyping without assets
     bool createSolid(Color c, TextureFilter filter = TextureFilter::Nearest);
     bool createChecker(int cells, Color a, Color b, int cellPx = 8);
@@ -34,6 +37,10 @@ public:
     void destroy();
     bool valid() const { return id_ != 0; }
     void bind(int slot = 0) const;
+    // Wraps an existing GL texture id so the batch can draw it (Framebuffer
+    // uses this). `owns` = false makes this a non-owning view: destroy() then
+    // does not delete the GL texture (the Framebuffer keeps ownership).
+    void adoptRaw(uint32_t id, int w, int h, bool owns = true);
 
     int width() const { return w_; }
     int height() const { return h_; }
@@ -48,6 +55,7 @@ private:
                 TextureFilter filter, TextureWrap wrap);
     uint32_t id_ = 0;
     int w_ = 0, h_ = 0, channels_ = 4;
+    bool owns_ = true; // false for non-owning views (Framebuffer textures)
     std::string path_;
 };
 

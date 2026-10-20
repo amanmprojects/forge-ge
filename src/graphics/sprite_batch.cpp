@@ -1,8 +1,10 @@
 #include "forge/graphics/sprite_batch.hpp"
 #include "forge/graphics/gl_loader.hpp"
+#include "forge/graphics/font.hpp"
 #include "forge/core/logger.hpp"
 #include <cstring>
 #include <cmath>
+#include <algorithm>
 
 namespace forge {
 
@@ -111,6 +113,16 @@ void SpriteBatch::begin(const Mat4& viewProj) {
     quadCount_ = 0;
     slotCount_ = 0;
     std::memset(slots_, 0, sizeof(slots_));
+    // A new batch starts unclipped and with the default blend mode (the
+    // previous end() already restored both).
+    scissorOn_ = false;
+    scissorDirty_ = false;
+    if (scissorActive_) { gl::glDisable(GL_SCISSOR_TEST); scissorActive_ = false; }
+    blend_ = BlendMode::Alpha;
+    blendApplied_ = BlendMode::Alpha;
+    gl::glEnable(GL_BLEND);
+    gl::glBlendEquation(GL_FUNC_ADD);
+    gl::glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     shader_.bind();
     shader_.setMat4("uProj", viewProj);
     gl::glBindVertexArray(vao_);
@@ -178,7 +190,64 @@ void SpriteBatch::draw(const SpriteDraw& d) {
     ++quadCount_;
 }
 
+void SpriteBatch::setScissor(Rect px) {
+    // Normalize (negative w/h would make glScissor invalid) and flush first so
+    // the previous quads keep the clipping they were issued with.
+    if (px.w < 0) { px.x += px.w; px.w = -px.w; }
+    if (px.h < 0) { px.y += px.h; px.h = -px.h; }
+    flush();
+    scissorOn_ = true;
+    scissorRect_ = px;
+    scissorDirty_ = true;
+}
+
+void SpriteBatch::clearScissor() {
+    if (!scissorOn_ && !scissorActive_) return;
+    flush();
+    scissorOn_ = false;
+    scissorDirty_ = true;
+}
+
 void SpriteBatch::flush() {
+    // Apply pending state changes even when there is nothing to draw, so the
+    // first quad of a new mode/clip gets the right GL state.
+    if (scissorDirty_) {
+        if (scissorOn_) {
+            gl::glEnable(GL_SCISSOR_TEST);
+            gl::glScissor((GLint)std::lround(scissorRect_.x),
+                          (GLint)std::lround(scissorRect_.y),
+                          (GLsizei)std::lround(scissorRect_.w),
+                          (GLsizei)std::lround(scissorRect_.h));
+            scissorActive_ = true;
+        } else {
+            gl::glDisable(GL_SCISSOR_TEST);
+            scissorActive_ = false;
+        }
+        scissorDirty_ = false;
+    }
+    if (blendApplied_ != blend_) {
+        switch (blend_) {
+            case BlendMode::Alpha:
+                gl::glEnable(GL_BLEND);
+                gl::glBlendEquation(GL_FUNC_ADD);
+                gl::glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+                break;
+            case BlendMode::Additive:
+                gl::glEnable(GL_BLEND);
+                gl::glBlendEquation(GL_FUNC_ADD);
+                gl::glBlendFunc(GL_SRC_ALPHA, GL_ONE);
+                break;
+            case BlendMode::Multiply:
+                gl::glEnable(GL_BLEND);
+                gl::glBlendEquation(GL_FUNC_ADD);
+                gl::glBlendFunc(GL_DST_COLOR, GL_ZERO);
+                break;
+            case BlendMode::None:
+                gl::glDisable(GL_BLEND);
+                break;
+        }
+        blendApplied_ = blend_;
+    }
     if (quadCount_ == 0) return;
     for (int i = 0; i < slotCount_; ++i) {
         if (slots_[i]) slots_[i]->bind(i);
@@ -198,6 +267,20 @@ void SpriteBatch::flush() {
 
 void SpriteBatch::end() {
     flush();
+    // Never leak a clip into user GL code / the next batch.
+    if (scissorActive_ || scissorOn_) {
+        gl::glDisable(GL_SCISSOR_TEST);
+        scissorActive_ = false;
+        scissorOn_ = false;
+        scissorDirty_ = false;
+    }
+    if (blendApplied_ != BlendMode::Alpha) {
+        gl::glEnable(GL_BLEND);
+        gl::glBlendEquation(GL_FUNC_ADD);
+        gl::glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        blendApplied_ = BlendMode::Alpha;
+    }
+    blend_ = BlendMode::Alpha;
     gl::glBindVertexArray(0);
 }
 
@@ -306,6 +389,77 @@ void SpriteBatch::drawLine(Vec2 a, Vec2 b, Color c, float thickness) {
     v[2] = {b.x + n.x * h, b.y + n.y * h, 0.5f, 0.5f, col, (float)slot};
     v[3] = {a.x + n.x * h, a.y + n.y * h, 0.5f, 0.5f, col, (float)slot};
     ++quadCount_;
+}
+
+void SpriteBatch::setBlendMode(BlendMode m) {
+    if (blend_ == m) return;
+    flush();      // state is applied by flush() before it returns
+    blend_ = m;
+    flush();      // apply immediately for the first draw in the new mode
+}
+
+void SpriteBatch::drawQuad(Vec2 a, Vec2 b, Vec2 c, Vec2 d, Color col,
+                           const Texture2D* tex, Rect uv) {
+    const Texture2D* t = (tex && tex->valid()) ? tex : &Texture2D::white();
+    int slot = -1;
+    for (int i = 0; i < slotCount_; ++i)
+        if (slots_[i] == t) { slot = i; break; }
+    if (slot < 0) {
+        if (quadCount_ >= MAX_QUADS || slotCount_ >= MAX_SLOTS) flush();
+        slots_[slotCount_] = t;
+        slot = slotCount_++;
+    } else if (quadCount_ >= MAX_QUADS) {
+        flush();
+        slots_[slotCount_] = t;
+        slot = slotCount_++;
+    }
+    uint32_t c32 = col.pack();
+    float u0 = uv.x, v0 = uv.y, u1 = uv.x + uv.w, v1 = uv.y + uv.h;
+    Vertex* v = &mapped_[quadCount_ * 4];
+    v[0] = {a.x, a.y, u0, v0, c32, (float)slot};
+    v[1] = {b.x, b.y, u1, v0, c32, (float)slot};
+    v[2] = {c.x, c.y, u1, v1, c32, (float)slot};
+    v[3] = {d.x, d.y, u0, v1, c32, (float)slot};
+    ++quadCount_;
+}
+
+void SpriteBatch::drawNineSlice(const Texture2D& tex, Rect dst, Rect srcPixel, float border,
+                                Color c) {
+    if (border <= 0 || srcPixel.w <= 0 || srcPixel.h <= 0) {
+        drawTextureRegion(tex, dst.center(), dst.size(), srcPixel, 0, c);
+        return;
+    }
+    float b = std::min({border, srcPixel.w * 0.5f, srcPixel.h * 0.5f});
+    // Destination corner size is the border scaled to the destination's
+    // aspect; simplest predictable rule: keep the border in destination px.
+    float db = std::min({b, dst.w * 0.5f, dst.h * 0.5f});
+    float sw[3] = {b, srcPixel.w - 2 * b, b};
+    float sh[3] = {b, srcPixel.h - 2 * b, b};
+    float dw[3] = {db, dst.w - 2 * db, db};
+    float dh[3] = {db, dst.h - 2 * db, db};
+    float sx[3] = {srcPixel.x, srcPixel.x + b, srcPixel.x + srcPixel.w - b};
+    float sy[3] = {srcPixel.y, srcPixel.y + b, srcPixel.y + srcPixel.h - b};
+    float dx[3] = {dst.x, dst.x + db, dst.x + dst.w - db};
+    float dy[3] = {dst.y, dst.y + db, dst.y + dst.h - db};
+    for (int row = 0; row < 3; ++row) {
+        for (int col = 0; col < 3; ++col) {
+            if (dw[col] <= 0 || dh[row] <= 0) continue;
+            Rect src{sx[col], sy[row], sw[col], sh[row]};
+            Vec2 pos{dx[col] + dw[col] * 0.5f, dy[row] + dh[row] * 0.5f};
+            drawTextureRegion(tex, pos, {dw[col], dh[row]}, src, 0, c);
+        }
+    }
+}
+
+void SpriteBatch::drawPanel(Rect r, Color fill, Color border, float thickness) {
+    drawRect(r, fill);
+    if (thickness > 0) drawRectOutline(r, border, thickness);
+}
+
+void SpriteBatch::drawTextShadow(const Font& font, const std::string& text, Vec2 pos,
+                                 float scale, Color c, Color shadow) {
+    font.draw(*this, text, {pos.x + 1.0f, pos.y - 1.0f}, scale, shadow);
+    font.draw(*this, text, pos, scale, c);
 }
 
 } // namespace forge

@@ -10,7 +10,7 @@ audio engine and asset manager, and drives the frame loop.
 
 ```cpp
 struct EngineConfig {
-    WindowConfig window;          // ⚠ ignored in 0.1.0 (see below)
+    WindowConfig window;          // applied when the Engine is constructed
     float fixedStep = 1.0f / 60.0f;  // runFixed update step
     int   maxSteps  = 5;             // max update calls per rendered frame
     bool  initAudio = true;          // soft-fails to muted
@@ -19,11 +19,10 @@ struct EngineConfig {
 };
 ```
 
-> **0.1.0 quirk:** `Engine` default-constructs its `Window` member before the
-> config is applied, so `EngineConfig::window` has no effect (title, size,
-> vsync, msaa, fullscreen are all default: 1280×720, resizable, vsync on).
-> Set the title with `engine.window().setTitle(...)`. Everything else in
-> `EngineConfig` works.
+> **Fixed in 0.2.0:** `Engine` now constructs its `Window` from
+> `EngineConfig::window`, so title/size/vsync/MSAA/fullscreen apply at
+> creation. `engine.window().config()` reports what was applied;
+> `setTitle(...)` still works at runtime.
 
 Construction: `explicit Engine(const EngineConfig& cfg = {});` — non-copyable.
 Check `engine.valid()`; on failure the engine logs `FORGE_LOG_FATAL` and all
@@ -89,10 +88,15 @@ If a `Framebuffer` is bound you'll clear the FBO instead — see 04.
 
 ## Window
 
+`EngineConfig::window` is honoured as of 0.2.0: the `Engine` constructs its
+`Window` from the config, so title/size/vsync/fullscreen/MSAA apply at
+creation. `engine.window().config()` returns the applied `WindowConfig` and
+`setTitle()` updates it.
+
 Owned by `Engine`; rarely used directly.
 
 ```cpp
-struct WindowConfig {                    // (ignored via Engine in 0.1.0)
+struct WindowConfig {
     int width = 1280, height = 720;
     std::string title = "Forge Game";
     bool resizable = true, vsync = true, fullscreen = false, highDPI = true;
@@ -102,6 +106,8 @@ struct WindowConfig {                    // (ignored via Engine in 0.1.0)
 bool  valid() const;
 void  swapBuffers();
 void  setTitle(const std::string& t);
+const std::string& title() const;
+const WindowConfig& config() const;   // the config the window was created with
 void  setVSync(bool on);   bool vsync() const;
 IVec2 size() const;         // logical window size
 IVec2 drawableSize() const; // physical pixels (use this for rendering)
@@ -151,6 +157,10 @@ Filled by the SDL event pump once per rendered frame; committed ("end of
 input window") after the code that consumes it actually runs — after each
 `update` step in `runFixed`, after `frame(dt)` in `runVariable`, at
 `beginFrame` in a manual loop. Queries are cheap and can be called repeatedly.
+
+Sources: keyboard, mouse, up to 4 gamepads, and touch (SDL finger events,
+normalized window coordinates converted to drawable pixels). IME composition
+events feed the text-editing state.
 
 ### Keyboard
 
@@ -229,23 +239,89 @@ Pad bindings match any connected pad in `actionPressed/Released`, but
 
 ```cpp
 Vec2 moveAxis(int pad = -1) const;
+void setStickDeadzone(float dz);   // clamped to 0..1, default 0.18
+float stickDeadzone() const;
+void setStickCurve(float power);   // response curve exponent, default 1.0
+float stickCurve() const;
 ```
 
 Combines WASD + arrows + one pad's sticks/dpad (or **all connected pads** when
 `pad == -1`) into a Y-up vector, sticks applied with `y -= stickY`, length
 clamped to 1. Use `moveAxis(0)` when you want a specific pad only.
 
-### Text input
+The deadzone is radial (the whole stick vector is remapped so output starts at
+0 outside the deadzone and still reaches 1 at the rim), then `stickCurve`
+applies `pow(magnitude, curve)` — `1.0` is linear, `> 1` gives finer control
+near the center.
+
+### Text input and IME
 
 ```cpp
-void pushText(const char* utf8);   // fed from SDL_TEXT_INPUT by Engine
-std::string consumeText();         // takes and clears this frame's text
+void pushText(const char* utf8);      // fed from SDL_EVENT_TEXT_INPUT by Engine
+std::string consumeText();            // takes and clears this frame's text
+
+// IME composition preview (CJK input, etc.). `cursor` is a UTF-8 byte offset
+// into the composition string, or -1 when the IME has no selection.
+void setComposition(std::string utf8, int cursor = -1);
+const std::string& composition() const;
+int compositionCursor() const;
+bool composing() const;
 ```
 
-Useful for high-score name entry. Text accumulates during the current input
-window and is cleared when it commits (after `frame(dt)` / after each
-`update` step / at the next `beginFrame` in a manual loop) — the code that
-consumes it gets it exactly once.
+Useful for high-score name entry and any text field. Text accumulates during
+the current input window and is cleared when it commits (after `frame(dt)` /
+after each `update` step / at the next `beginFrame` in a manual loop) — the
+code that consumes it gets it exactly once. The composition string is cleared
+when the window commits; the IME sends a new one on every keystroke.
+
+Draw the composition underlined or with a caret at `compositionCursor()`; do
+not insert it into your buffer until `SDL_EVENT_TEXT_INPUT` delivers the
+committed text.
+
+### Touch
+
+```cpp
+struct TouchPoint {
+    int64_t id;
+    Vec2 pos;        // drawable pixels, top-left origin (same as mousePos())
+    Vec2 start;      // where this finger went down
+    float pressure;  // 0..1 (device dependent)
+};
+
+bool touchDown(int64_t id, Vec2 pos, float pressure = 1.0f);
+void touchMove(int64_t id, Vec2 pos, float pressure = 1.0f);
+void touchUp(int64_t id);
+void touchCancel(int64_t id);
+
+const std::vector<TouchPoint>& touches() const;
+const TouchPoint* touch(int64_t id) const;   // nullptr when not down
+Vec2 touchDrag(int64_t id) const;            // pos - start (zero when lifted)
+bool touchActive() const;                    // any finger down
+bool touchPressed() const;                   // a finger went down this window
+bool touchReleased() const;                  // a finger lifted this window
+```
+
+`Engine` feeds these from `SDL_EVENT_FINGER_DOWN/MOTION/UP/CANCELED`. The
+press/release latches are window-scoped exactly like key latches: a quick tap
+is never dropped. Convert to world space with `cam.screenToWorld(p, vp.x,
+vp.y)`, same as the mouse. Multi-touch is supported (ids come from SDL).
+
+### Persisted action remaps
+
+```cpp
+std::string serializeBinds() const;             // "jump=space,z,mouse:left,pad:a\n..."
+bool deserializeBinds(const std::string& text, std::string* error = nullptr);
+bool saveBinds(const std::string& path) const;  // atomic-ish text file
+bool loadBinds(const std::string& path, std::string* error = nullptr);
+```
+
+One action per line, `action=source,source,...`, `#` starts a comment. Sources
+are key names (`keyFromName` names), `mouse:<left|right|middle|x1|x2>` and
+`pad:<a|b|x|y|back|guide|start|ls|rs|lb|rb|up|down|left|right>`. Parsing is
+strict: an unknown token fails with `line N: ...` in `error` and leaves the
+previous bindings untouched. Bind files are plain text, so shipping a default
+`binds.txt` next to the game and letting the player edit it works without any
+extra format.
 
 ## Logger
 

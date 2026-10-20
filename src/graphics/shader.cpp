@@ -1,13 +1,23 @@
 #include "forge/graphics/shader.hpp"
 #include "forge/graphics/gl_loader.hpp"
 #include "forge/core/logger.hpp"
+#include "forge/core/platform.hpp"
 #include <fstream>
 #include <sstream>
 
 namespace forge {
 
-const char* Shader::kSpriteVert = R"GLSL(
-#version 330 core
+// Desktop GLSL 3.30 core vs. WebGL2 (GLSL ES 3.00). The bodies below are
+// written in the subset both accept, so only the version directive and the
+// ES-mandated float/int precision differ.
+#if FORGE_PLATFORM_WEB
+#define FORGE_GLSL_HEADER \
+    "#version 300 es\nprecision highp float;\nprecision highp int;\n"
+#else
+#define FORGE_GLSL_HEADER "#version 330 core\n"
+#endif
+
+const char* Shader::kSpriteVert = FORGE_GLSL_HEADER R"GLSL(
 layout(location = 0) in vec2 aPos;
 layout(location = 1) in vec2 aUV;
 layout(location = 2) in vec4 aColor;
@@ -24,15 +34,15 @@ void main() {
 }
 )GLSL";
 
-const char* Shader::kSpriteFrag = R"GLSL(
-#version 330 core
+const char* Shader::kSpriteFrag = FORGE_GLSL_HEADER R"GLSL(
 in vec2 vUV;
 in vec4 vColor;
 in float vTexIndex;
 out vec4 FragColor;
 uniform sampler2D uTextures[16];
 void main() {
-    // NOTE: dynamic sampler indexing is forbidden in GLSL 3.30, so unroll.
+    // NOTE: dynamic sampler indexing is forbidden in GLSL 3.30 (and in ES
+    // 3.00), so unroll.
     int idx = int(vTexIndex + 0.5);
     vec4 tex;
     if (idx == 0) tex = texture(uTextures[0], vUV);

@@ -41,7 +41,7 @@ and a clean exit:
 
 int main() {
     forge::EngineConfig cfg;
-    cfg.window.title = "My Game";        // NOTE: ignored in 0.1.0 — see below
+    cfg.window.title = "My Game";        // applied when the Engine is constructed
     forge::Engine engine(cfg);
     if (!engine.valid()) return 1;       // window or GL creation failed
 
@@ -70,10 +70,10 @@ int main() {
 
 Notes:
 
-- `EngineConfig::window` (title/size/vsync/…) is **ignored in 0.1.0** because
-  `Engine` default-constructs its `Window` member before the config applies.
-  Use `engine.window().setTitle("…")` at runtime. The default window is
-  1280×720, resizable, vsync on.
+- `EngineConfig::window` (title/size/vsync/fullscreen/MSAA) is applied at
+  construction. The defaults are 1280×720, resizable, vsync on. A window
+  manager may override the size — use `engine.viewport()` (drawable pixels)
+  for layout, and `engine.window().setTitle(...)` to retitle at runtime.
 - `runVariable` calls your callback exactly once per frame with the clamped
   frame delta (`Time::maxDelta`, default 0.1 s).
 - `engine.clear(r,g,b)` is the intended way to begin a frame; it sets the
@@ -204,3 +204,55 @@ CI=1 ./build/07_breakout --frames 240  # game smoke test, exit 0/1
 Both games parse `--help` for their full flag lists; between them they cover
 headless capture, autopilot demos, seeded determinism and CI smoke modes — the
 best templates when you need to make your own game testable.
+
+## Web build (WebAssembly)
+
+`09_chess` also builds for the browser (Emscripten + WebGL2). See
+[`web/README.md`](../../web/README.md) for the full picture.
+
+```bash
+./web/build.sh                            # -> web/dist/{index.html,index.js,index.wasm,index.data}
+python3 -m http.server 8000 -d web/dist   # then open http://localhost:8000/
+```
+
+What changes on the web, all behind `FORGE_PLATFORM_WEB`:
+
+- **Shaders**: `#version 330 core` becomes `#version 300 es` (+ ES precision).
+  Write shader bodies in the subset both accept.
+- **Frame loop**: `runFixed`/`runVariable` hand the loop to
+  `emscripten_set_main_loop_arg`; the browser drives the frames from
+  `requestAnimationFrame`.
+- **GL loader**: GL is linked into the module, so the loader binds the symbols
+  directly instead of asking SDL for them.
+- **No threads**: pthreads in a browser need `SharedArrayBuffer` plus
+  COOP/COEP headers, so nothing in the engine or the examples spawns one.
+
+**The one trap: state must outlive `main()`.** Taking over the frame loop
+unwinds `main()`'s stack (that is what `simulate_infinite_loop` means), and
+whatever lived in that stack frame is dead memory by the first frame. Keep the
+engine and your game state on the heap (or in globals):
+
+```cpp
+#if FORGE_PLATFORM_WEB
+    // Emscripten unwinds main()'s stack: these must outlive it.
+    auto engineOwner = std::make_unique<forge::Engine>(cfg);
+    auto gameOwner = std::make_unique<MyGame>();
+    forge::Engine& engine = *engineOwner;
+    MyGame& game = *gameOwner;
+#else
+    forge::Engine engine(cfg);
+    MyGame game;
+#endif
+    engine.runFixed([&](float dt) { game.update(dt); }, [&] { game.render(); });
+```
+
+The lambdas capture the heap objects, not `main`'s locals, so the callbacks stay
+valid. Variables that lived in `main` (frame counters, config, the parsed
+arguments) are not — put them in the game object.
+
+The canvas is sized by CSS and SDL follows the DOM: give the `<canvas>` an
+explicit width in the page (a `width: auto` canvas that derives its size from
+its own drawing buffer oscillates). Audio starts suspended: browsers only run an
+`AudioContext` after a user gesture, and miniaudio's WebAudio backend resumes it
+on the first `click`/`touchend`, so the first click on the page is what unlocks
+sound.

@@ -1,6 +1,7 @@
 #include "forge/graphics/texture.hpp"
 #include "forge/graphics/gl_loader.hpp"
 #include "forge/core/logger.hpp"
+#include <cstring>
 #include <vector>
 
 #define STB_IMAGE_IMPLEMENTATION
@@ -73,6 +74,28 @@ bool Texture2D::createSolid(Color c, TextureFilter filter) {
     return true;
 }
 
+bool Texture2D::updateRegion(const uint8_t* data, int x, int y, int w, int h, int channels) {
+    if (!id_ || !data || w <= 0 || h <= 0 || channels < 1 || channels > 4) return false;
+    if (x < 0 || y < 0 || x + w > w_ || y + h > h_) return false;
+    GLenum fmt = channels == 4 ? GL_RGBA : (channels == 3 ? GL_RGB : GL_RED);
+    gl::glBindTexture(GL_TEXTURE_2D, id_);
+    gl::glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    // Texture memory is stored flipped on load (flipY=true): the caller's
+    // top-left-origin rect lands in GL's bottom-left rows, and its rows go in
+    // back-to-front - the caller's first row is the last row of the band, so
+    // the result matches a full flipped upload of the whole image.
+    int glY = h_ - (y + h);
+    const size_t rowBytes = (size_t)w * (size_t)channels;
+    std::vector<uint8_t> band(rowBytes * (size_t)h);
+    for (int r = 0; r < h; ++r) {
+        std::memcpy(&band[(size_t)r * rowBytes],
+                    data + (size_t)(h - 1 - r) * rowBytes, rowBytes);
+    }
+    gl::glTexSubImage2D(GL_TEXTURE_2D, 0, x, glY, w, h, fmt, GL_UNSIGNED_BYTE, band.data());
+    gl::glBindTexture(GL_TEXTURE_2D, 0);
+    return true;
+}
+
 bool Texture2D::createChecker(int cells, Color a, Color b, int cellPx) {
     int size = cells * cellPx;
     std::vector<uint8_t> px((size_t)size * size * 4);
@@ -90,16 +113,26 @@ bool Texture2D::createChecker(int cells, Color a, Color b, int cellPx) {
 
 void Texture2D::destroy() {
     if (id_) {
-        if (gl::isLoaded()) gl::glDeleteTextures(1, &id_);
+        if (owns_ && gl::isLoaded()) gl::glDeleteTextures(1, &id_);
         id_ = 0;
     }
     w_ = h_ = 0;
+    owns_ = true;
     path_.clear();
 }
 
 void Texture2D::bind(int slot) const {
     gl::glActiveTexture((GLenum)(GL_TEXTURE0 + slot));
     gl::glBindTexture(GL_TEXTURE_2D, id_);
+}
+
+void Texture2D::adoptRaw(uint32_t id, int w, int h, bool owns) {
+    destroy();
+    id_ = id;
+    w_ = w;
+    h_ = h;
+    channels_ = 4;
+    owns_ = owns;
 }
 
 Texture2D& Texture2D::white() {

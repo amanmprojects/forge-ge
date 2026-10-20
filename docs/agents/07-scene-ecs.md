@@ -116,6 +116,10 @@ struct Collider {
 
 struct Tag { std::string name; };
 
+// Data-only script id, saved with the scene. The game re-binds the behavior
+// by name after load (a `Script` closure is code and is never serialized).
+struct ScriptRef { std::string name; };
+
 struct Script {
     std::function<void(Entity, Registry&, float)> onUpdate;
     std::function<void(Entity, Registry&)> onStart;
@@ -223,3 +227,40 @@ scene.registry().view<Bullet, Transform>([&](forge::Entity e, Bullet& b, forge::
 
 Both live fine in the same game; `05_scene.cpp` shows a mid-size example, and
 `02_platformer.cpp` shows physics without ECS.
+
+## Serialization and prefabs
+
+`forge/scene/serialization.hpp` saves the **data** components of a scene to
+versioned JSON, and re-instantiates them as prefabs.
+
+```cpp
+#include <forge/forge.hpp>
+
+// save / load a whole scene
+forge::saveScene(scene, "save.json", &engine.assets());
+forge::Scene loaded;
+forge::SceneSaveStats stats;
+if (forge::loadScene(loaded, "save.json", &engine.assets(), &stats))
+    std::printf("%d entities, %d sprites\n", stats.entities, stats.sprites);
+
+// prefabs
+forge::Prefab hero = forge::makePrefab(scene, heroEntity, "hero");
+forge::savePrefab(hero, "hero.prefab.json");
+forge::Prefab loadedPrefab;
+forge::loadPrefab(loadedPrefab, "hero.prefab.json");
+forge::Entity e = forge::instantiate(scene, loadedPrefab, {100, 200}, &engine.assets());
+```
+
+- Format: `{"format":"forge.scene","version":1,"entities":[...]}`. A prefab is
+  the same entity object without the wrapper, so it is also hand-editable.
+- Serialized components: `Transform`, `Tag`, `Sprite`, `Velocity`, `Collider`,
+  `ScriptRef`. `Script` closures are **not** serialized — re-attach them after
+  `loadScene` by matching `ScriptRef::name`.
+- Sprite textures are stored as `Texture2D::path()` and resolved through the
+  `AssetManager` (its search paths apply). With no `AssetManager` the sprite
+  keeps its rect but gets a null texture.
+- `instantiate` overrides the stored Transform position; `entityToJson`/
+  `entityFromJson` are the primitives if you want entity data embedded in your
+  own save format.
+- Loading is strict: a wrong `format`, a missing file or malformed JSON returns
+  false and leaves the target scene untouched (no exceptions anywhere).

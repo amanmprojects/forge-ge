@@ -1,0 +1,132 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CMAKE_BUILD_PARALLEL_LEVEL: 4
+
+jobs:
+  linux:
+    name: Linux ${{ matrix.compiler }} ${{ matrix.build_type }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - compiler: gcc
+            cc: gcc
+            cxx: g++
+            build_type: Release
+          - compiler: gcc
+            cc: gcc
+            cxx: g++
+            build_type: Debug
+          - compiler: clang
+            cc: clang
+            cxx: clang++
+            build_type: Release
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build libsdl3-dev libgl1-mesa-dev \
+            xvfb libgl1-mesa-dri
+      - name: Configure
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
+            -DCMAKE_C_COMPILER=${{ matrix.cc }} \
+            -DCMAKE_CXX_COMPILER=${{ matrix.cxx }}
+      - name: Build
+        run: cmake --build build
+      - name: Test (headless)
+        run: ctest --test-dir build --output-on-failure
+      - name: Render self-test (Xvfb)
+        run: xvfb-run -a ./build/06_verify
+      - name: Smoke runs (Xvfb)
+        run: |
+          xvfb-run -a env CI=1 ./build/01_hello
+          xvfb-run -a env CI=1 ./build/07_breakout --frames 240
+          xvfb-run -a env CI=1 ./build/08_snake --frames 240
+          xvfb-run -a env CI=1 ./build/09_chess
+          xvfb-run -a env CI=1 ./build/10_lantern --frames 240
+          xvfb-run -a ./build/10_lantern --selftest
+      - name: Deterministic screenshots
+        run: |
+          xvfb-run -a ./build/07_breakout --shot /tmp/a.png --frames 120
+          xvfb-run -a ./build/07_breakout --shot /tmp/b.png --frames 120
+          cmp /tmp/a.png /tmp/b.png
+          xvfb-run -a ./build/10_lantern --shot /tmp/la.png --frames 180
+          xvfb-run -a ./build/10_lantern --shot /tmp/lb.png --frames 180
+          cmp /tmp/la.png /tmp/lb.png
+      - name: Install + consumer package check
+        run: |
+          cmake --install build --prefix /tmp/forge-prefix
+          mkdir -p /tmp/consumer
+          cat > /tmp/consumer/CMakeLists.txt <<'CMAKE'
+          cmake_minimum_required(VERSION 3.20)
+          project(consumer CXX)
+          set(CMAKE_CXX_STANDARD 20)
+          find_package(forge REQUIRED)
+          add_executable(consumer main.cpp)
+          target_link_libraries(consumer PRIVATE forge::forge)
+          CMAKE
+          cat > /tmp/consumer/main.cpp <<'CPP'
+          #include <forge/forge.hpp>
+          int main() { forge::Vec2 v{1, 2}; return v.lengthSq() > 0 ? 0 : 1; }
+          CPP
+          cmake -S /tmp/consumer -B /tmp/consumer/build \
+            -DCMAKE_PREFIX_PATH=/tmp/forge-prefix
+          cmake --build /tmp/consumer/build
+          /tmp/consumer/build/consumer
+
+  macos:
+    name: macOS Release
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install SDL3
+        run: brew install sdl3
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+      - name: Build
+        run: cmake --build build
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+      - name: Smoke runs
+        run: |
+          CI=1 ./build/07_breakout --frames 240
+          CI=1 ./build/08_snake --frames 240
+          CI=1 ./build/09_chess
+          CI=1 ./build/10_lantern --frames 240
+          ./build/10_lantern --selftest
+
+  windows:
+    name: Windows Release
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install SDL3 (vcpkg)
+        run: vcpkg install sdl3:x64-windows
+      - name: Configure
+        run: >
+          cmake -S . -B build -A x64
+          -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake"
+      - name: Build
+        run: cmake --build build --config Release
+      - name: Test
+        run: ctest --test-dir build -C Release --output-on-failure
+      - name: Smoke runs
+        run: |
+          $env:CI = "1"
+          ./build/Release/07_breakout.exe --frames 240
+          ./build/Release/08_snake.exe --frames 240
+          ./build/Release/09_chess.exe
+          ./build/Release/10_lantern.exe --frames 240
+          ./build/Release/10_lantern.exe --selftest

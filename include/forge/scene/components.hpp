@@ -53,6 +53,12 @@ struct Tag {
     std::string name;
 };
 
+// Data-only script id. Serialized with the scene so the game can re-bind the
+// behavior by name after loading (`ScriptRef{"player"}` -> `Script` closure).
+struct ScriptRef {
+    std::string name;
+};
+
 // Lightweight per-entity script: called by Scene each frame.
 struct Script {
     std::function<void(Entity, Registry&, float)> onUpdate;

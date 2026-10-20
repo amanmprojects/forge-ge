@@ -11,8 +11,9 @@ OpenGL 3.3 core (rendering). One static library, one umbrella header:
 
 Dependencies are deliberately minimal: SDL3 + OpenGL are the only system
 requirements; `stb_image`, `stb_truetype`, `stb_image_write`, `miniaudio` and
-a 60-function GL loader are vendored in `third_party/`. No GLEW/GLAD, no
-FreeType, no JSON library (the Tiled loader has a small internal parser).
+a GL loader are vendored in `third_party/`. No GLEW/GLAD, no FreeType, no
+ImGui, no Lua, no third-party JSON library (the shared parser/writer is
+`include/forge/utils/json.hpp`).
 
 ## Module map
 
@@ -20,12 +21,13 @@ FreeType, no JSON library (the Tiled loader has a small internal parser).
 |---|---|---|
 | core | `include/forge/core/` | `Engine`, `Window`, `Input`, `Time`, `FixedStepper`, `Logger` |
 | math | `include/forge/math/` | `Vec2/IVec2/Vec4/Mat4/Rect/Circle/Color`, `Random`, easings, value noise, narrowphase |
-| graphics | `include/forge/graphics/` | `SpriteBatch`, `Camera2D`, `Texture2D`, `Font`, `Framebuffer`, `ParticleSystem`, `Animator`/`Tweens`, `Tilemap`, `Shader`, `forge::gl` loader |
-| physics | `include/forge/physics/` | `PhysicsWorld` (AABB, arcade solver) |
-| scene | `include/forge/scene/` | generational ECS `Registry`, built-in components, `Scene` |
+| graphics | `include/forge/graphics/` | `SpriteBatch`, `Camera2D`, `Texture2D`, `Font`, `Framebuffer`, `ParticleSystem`, `Animator`/`Tweens`, `Tilemap`, `AtlasPacker`, `LightingSystem`, `PostProcess`/`FullscreenPass`/`RenderTargetStack`, `Skeleton`, `Shader`, `forge::gl` loader |
+| physics | `include/forge/physics/` | `PhysicsWorld` (AABB + circles, arcade solver, filtering, joints) |
+| scene | `include/forge/scene/` | generational ECS `Registry`, built-in components, `Scene`, scene/prefab serialization |
 | audio | `include/forge/audio/` | `AudioEngine` (miniaudio mixer) |
-| assets | `include/forge/assets/` | `AssetManager` cache + hot reload |
-| utils | `include/forge/utils/` | `Profiler` + `FORGE_ZONE` macros |
+| assets | `include/forge/assets/` | `AssetManager` cache, search paths, hot reload |
+| script | `include/forge/script/` | `ScriptVM` — deterministic embedded scripting |
+| utils | `include/forge/utils/` | `Profiler`, `json`, `DebugOverlay` |
 
 The headers are the source of truth for signatures. These docs explain the
 *behavior* you can't see from a signature.

@@ -13,6 +13,34 @@ choosing it.
 ## Body
 
 ```cpp
+enum class BodyType  { Static, Kinematic, Dynamic };
+enum class ShapeType { Box, Circle };
+
+struct Body {
+    uint32_t id = 0;
+    BodyType type = BodyType::Dynamic;
+    ShapeType shape = ShapeType::Box;
+    Vec2 pos{0,0};          // center
+    Vec2 prevPos{0,0};      // center at the start of the last substep
+    Vec2 vel{0,0};
+    Vec2 size{32,32};       // full extents (Box)
+    float radius = 16.0f;   // Circle only
+    float gravityScale = 1.0f;
+    float friction = 0.0f;  // ground friction applied while onGround
+    float restitution = 0.0f;
+    bool onGround = false;
+    bool sensor = false;    // reports overlap, never resolves
+    bool oneWay = false;    // solid only when entered from the top
+    uint32_t layer = 0xFFFFFFFFu;  // collision filtering
+    uint32_t mask  = 0xFFFFFFFFu;
+    void* userData = nullptr;
+
+    Rect aabb() const;      // box extents, centered on pos
+    Rect bounds() const;    // tight bounds for either shape
+};
+```
+
+```cpp
 enum class BodyType { Static, Kinematic, Dynamic };
 
 struct Body {
@@ -80,6 +108,16 @@ Non-const `get()` also marks the query grid dirty; the const overload does not.
 
 ```cpp
 struct Contact {
+    uint32_t a = 0, b = 0;
+    Vec2 normal{0,0};       // from b to a (the direction a is pushed out)
+    float penetration = 0;
+    Vec2 point{0,0};
+    bool sensor = false;    // overlap-only pair
+};
+```
+
+```cpp
+struct Contact {
     uint32_t a = 0, b = 0;   // body ids (a.id/b.id)
     Vec2 normal{0,0};        // unit axis; points such that moving `a` along it (or `b` against it) separates the pair
     float penetration = 0;   // overlap depth along normal
@@ -109,6 +147,97 @@ world.onContact([&](const forge::Contact& c) {
         collectCoin();
 });
 ```
+
+## Filtering, sensors and one-way platforms
+
+```cpp
+// Layer/mask: a pair collides only when both checks pass.
+player.layer = 0x1;  player.mask  = 0x1 | 0x4;   // walls + enemies
+wall.layer   = 0x1;  wall.mask    = 0xFFFFFFFFu;
+enemy.layer  = 0x4;  enemy.mask   = 0x1 | 0x4;
+
+// Sensors report overlap without resolving.
+coin.sensor = true;
+world.onTriggerEnter([](const Contact& c) { /* c.a / c.b */ });
+world.onTriggerExit([](const Contact& c) { /* ... */ });
+
+// One-way platform: solid only when a dynamic body comes down onto it.
+platform.oneWay = true;
+```
+
+- `filterAllows(a, b)` requires `(a.layer & b.mask) != 0` **and**
+  `(b.layer & a.mask) != 0`. Filtered pairs never reach the solver, the
+  contact callback, or the trigger set. Defaults are all-bits, so existing
+  code is unaffected.
+- Trigger enter/exit come from a persistent set of sensor pairs, evaluated
+  after the step. Enter fires on the first overlapping step, exit on the first
+  step where the pair is gone; moving or removing a sensor mid-step is safe
+  (the sets are rebuilt, not mutated during iteration).
+- One-way bodies (`oneWay = true`) are skipped unless the other body is a
+  dynamic body whose **bottom was above the platform top last substep** and is
+  moving down (or resting). Walking/jumping up through them works; falling
+  onto them lands. `Body::prevPos` is what makes this reliable at high speed.
+- Sensors are never solved and never carry riders; `onContact` reports them
+  with `contact.sensor = true` only if you also registered `onContact`.
+
+## Moving-platform carry
+
+Bodies that were resting on a kinematic/static body (tracked per substep in
+`support_`) inherit that support's delta before integration. So a moving
+platform carries riders horizontally and vertically without the solver
+fighting the motion, and stepping off simply drops the support link on the
+next substep. Kinematic bodies are moved by writing `body.pos`/`body.vel`
+yourself; carry uses the resulting per-step delta.
+
+## Circle colliders
+
+`Body::shape = ShapeType::Circle` uses `radius` instead of `size`. Supported
+combinations: circle-circle, circle-box and box-circle, each producing an MTV
+(and `Contact::point` at the closest feature). The solver, raycast and
+`queryRect` all use `bounds()`, so a circle is queried by its tight AABB.
+Rendering/physics debug draws circles as polygons.
+
+## Joints
+
+```cpp
+forge::Joint j;
+j.type = forge::JointType::Distance;   // or Spring
+j.a = bodyA; j.b = bodyB;
+j.restLength = 0.0f;                   // 0 = current distance at add time
+j.stiffness = 1.0f;                    // 0..1 position correction
+j.damping = 0.2f;                      // 0..1 velocity damping along the axis
+uint32_t id = world.addJoint(j);
+world.removeJoint(id);
+```
+
+Joints are solved **after** integration, once per substep: a position
+correction (fraction `stiffness` of the length error) plus an optional velocity
+correction along the axis. `Distance` holds a fixed length; `Spring` pulls
+toward `restLength` proportionally. There is no angular constraint, no
+revolute joint and no motor — again, arcade-grade by design.
+
+## CCD / substepping
+
+`setContinuous(true)` (default) derives the substep count from the fastest
+body's speed relative to the smallest body extent, clamped to 16 substeps per
+`step()`. Fast projectiles therefore cannot tunnel through thin walls at
+normal frame rates. Turn it off for a cheaper, fully discrete step; note that
+`dt` is always clamped to 0.1 s, so a long frame cannot explode the solver.
+
+## Debug draw
+
+```cpp
+forge::PhysicsDebugOptions opts;
+opts.bodies = true; opts.sensors = true; opts.joints = true;
+opts.contacts = true; opts.velocities = true; opts.labels = true;
+opts.font = &font;
+world.debugDraw(batch, opts);     // between batch.begin()/end()
+```
+
+Draws body wireframes colored by type (static/kinematic/dynamic), sensors in a
+distinct color, joints as lines, contact points/normals, velocity arrows, and
+optional id labels. It is the fastest way to see why something is not
+colliding.
 
 ## step(dt) — exact behavior
 
@@ -164,6 +293,15 @@ uint32_t id = 0;
 if (world.raycast(gunMuzzle, aimPoint, &id, &hit))
     spawnImpact(hit);
 ```
+
+## Slopes (tilemap collision)
+
+Slopes are a **tilemap** feature, not a body feature: `Tilemap::setSlope(id,
+left, right)` gives a solid tile a linear surface, and `Tilemap::collideRect`
+resolves it vertically against the surface under the rect's center. See
+[`04-graphics.md`](04-graphics.md#tilemap). Keep the player's tile collision
+separate from `PhysicsWorld` when you use slopes; the box solver has no
+knowledge of them.
 
 ## Determinism
 

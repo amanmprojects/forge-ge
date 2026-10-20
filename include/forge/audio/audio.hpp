@@ -46,9 +46,16 @@ public:
     void setSfxVolume(float v);
     float masterVolume() const { return masterVol_; }
 
-    // Convenience: music channel (single looped stream w/ crossfade-less swap)
+    // Convenience: music channel. playMusic swaps immediately; crossfadeMusic
+    // fades the outgoing track out while the new one fades in. Music voices
+    // are never stolen by sound effects.
     void playMusic(SoundHandle h, float volume = 0.8f);
+    // seconds <= 0 behaves like playMusic. The previous music voice keeps
+    // playing while it fades, then stops itself.
+    void crossfadeMusic(SoundHandle h, float seconds, float volume = 0.8f);
     void stopMusic();
+    // 0..1 progress of the current music crossfade (1 = no fade running).
+    float musicFadeProgress() const;
 
     int voiceCount() const;
 
@@ -57,6 +64,9 @@ private:
     bool deviceReady_ = false;
     float masterVol_ = 1.0f, musicVol_ = 0.8f, sfxVol_ = 1.0f;
     uint32_t musicVoice_ = 0;
+    uint32_t prevMusicVoice_ = 0; // fading out (crossfade)
+    float musicFadeT_ = 1.0f;     // 0..1, 1 = idle
+    float musicFadeDur_ = 0.0f;
 };
 
 } // namespace forge

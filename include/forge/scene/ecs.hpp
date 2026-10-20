@@ -162,6 +162,8 @@ public:
 
     template <typename T>
     T* tryGet(Entity e) { auto& p = pool<T>(); return p.has(e) ? &p.get(e) : nullptr; }
+    template <typename T>
+    const T* tryGet(Entity e) const { const auto& p = pool<T>(); return p.has(e) ? &p.get(e) : nullptr; }
 
     // View: iterate entities having all of Ts. Callback (Entity, Ts&...).
     // The callback must NOT create/destroy entities or add/remove components
