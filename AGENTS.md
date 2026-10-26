@@ -19,8 +19,10 @@ CI=1 ./build/09_chess                      # same for chess, exit 0/1
 CI=1 ./build/10_lantern --frames 240       # integration example
 ./build/10_lantern --selftest              # save/load round-trip, exit 0/1
 
-./web/build.sh                              # WebAssembly build -> web/dist
+./web/build.sh                              # WebAssembly build -> web/dist (5 games + gallery)
+./web/record.sh                             # gallery clips (--record + ffmpeg) -> web/dist/clips
 python3 -m http.server 8000 -d web/dist     # then open http://localhost:8000/
+./web/deploy.sh                             # web/dist -> gh-pages (GitHub Pages)
 ```
 
 Debug single-config builds get ASan+UBSan automatically. The library, examples
@@ -65,8 +67,9 @@ and tests compile with `-Wall -Wextra -Wpedantic` and must stay warning-free.
   install/export (`find_package(forge)`, `forge::forge`). `docs/ROADMAP.md`
   tracks the remaining plan.
 - The example games are also tests: `--shot file.png` writes a deterministic
-  PNG, `CI=1` runs a smoke mode with an exit code. Copy
-  `examples/07_breakout.cpp` for that pattern.
+  PNG, `--record clip.mp4` pipes one offscreen frame per fixed step to ffmpeg
+  (`examples/common/clip.hpp`), `CI=1` runs a smoke mode with an exit code.
+  Copy `examples/07_breakout.cpp` for that pattern.
 - `examples/chess/chess.hpp` (0x88 rules) and `examples/chess/ai.hpp` (negamax
   + eval) are engine-free, header-only and shared with `tests/test_chess.cpp`
   (perft + rules suite). Only `examples/chess/main.cpp` touches Forge, so the
@@ -78,10 +81,13 @@ and tests compile with `-Wall -Wextra -Wpedantic` and must stay warning-free.
   sprite is one whole board square, and if the folder is absent the game draws
   procedural silhouettes, so both paths must keep working.
 - Web builds (`./web/build.sh`) take the frame loop over with
-  `emscripten_set_main_loop_arg`, which unwinds `main()`'s stack: engine and
-  game state must live on the heap (or in globals) on `FORGE_PLATFORM_WEB`.
-  Never spawn threads there — pthreads would need COOP/COEP headers. See
-  [`web/README.md`](web/README.md).
+  `emscripten_set_main_loop_arg`, which unwinds `main()`'s stack (running its
+  locals' destructors, since the web build uses `-fwasm-exceptions`): engine
+  and game must be statics or globals on `FORGE_PLATFORM_WEB` — not
+  `unique_ptr` locals — and the loop lambdas must not capture `main()`'s locals. Never spawn threads
+  there — pthreads would need COOP/COEP headers. `Engine::quit()` is a no-op
+  on the web. Each game page is `web/shell.html.in` filled in by
+  `forge_web_page()` in `CMakeLists.txt`. See [`web/README.md`](web/README.md).
 
 ## Doc map
 

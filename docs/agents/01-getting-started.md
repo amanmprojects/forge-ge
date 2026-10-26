@@ -207,18 +207,20 @@ best templates when you need to make your own game testable.
 
 ## Web build (WebAssembly)
 
-`09_chess` also builds for the browser (Emscripten + WebGL2). See
+The five games (`02_platformer`, `07_breakout`, `08_snake`, `09_chess`,
+`10_lantern`) also build for the browser (Emscripten + WebGL2). See
 [`web/README.md`](../../web/README.md) for the full picture.
 
 ```bash
-./web/build.sh                            # -> web/dist/{index.html,index.js,index.wasm,index.data}
+./web/build.sh                            # -> web/dist/index.html + web/dist/<game>/
 python3 -m http.server 8000 -d web/dist   # then open http://localhost:8000/
 ```
 
 What changes on the web, all behind `FORGE_PLATFORM_WEB`:
 
-- **Shaders**: `#version 330 core` becomes `#version 300 es` (+ ES precision).
-  Write shader bodies in the subset both accept.
+- **Shaders**: `#version 330 core` becomes `#version 300 es` (+ ES precision),
+  for the engine's shaders and for any source passed to `Shader::load` that
+  opens with that directive. Write shader bodies in the subset both accept.
 - **Frame loop**: `runFixed`/`runVariable` hand the loop to
   `emscripten_set_main_loop_arg`; the browser drives the frames from
   `requestAnimationFrame`.
@@ -226,19 +228,25 @@ What changes on the web, all behind `FORGE_PLATFORM_WEB`:
   directly instead of asking SDL for them.
 - **No threads**: pthreads in a browser need `SharedArrayBuffer` plus
   COOP/COEP headers, so nothing in the engine or the examples spawns one.
+- **No quitting**: `Engine::quit()` is a no-op, so a game's Q/ESC binding
+  can't stop the loop and freeze the page.
+- **Exceptions**: everything compiles with `-fwasm-exceptions` (a PUBLIC flag
+  on `forge`), because `forge::script` unwinds `return`/`break` with C++
+  exceptions and Emscripten's default build aborts on the first throw.
 
 **The one trap: state must outlive `main()`.** Taking over the frame loop
 unwinds `main()`'s stack (that is what `simulate_infinite_loop` means), and
-whatever lived in that stack frame is dead memory by the first frame. Keep the
-engine and your game state on the heap (or in globals):
+whatever lived in that stack frame is dead memory by the first frame. Worse,
+with `-fwasm-exceptions` the unwind runs the destructors of `main()`'s locals,
+so a `std::unique_ptr` owner frees the game under the running loop. Make the
+engine and your game state statics (or globals); the web runtime never exits,
+so they are never destroyed:
 
 ```cpp
 #if FORGE_PLATFORM_WEB
     // Emscripten unwinds main()'s stack: these must outlive it.
-    auto engineOwner = std::make_unique<forge::Engine>(cfg);
-    auto gameOwner = std::make_unique<MyGame>();
-    forge::Engine& engine = *engineOwner;
-    MyGame& game = *gameOwner;
+    static forge::Engine engine(cfg);
+    static MyGame game;
 #else
     forge::Engine engine(cfg);
     MyGame game;
@@ -246,9 +254,9 @@ engine and your game state on the heap (or in globals):
     engine.runFixed([&](float dt) { game.update(dt); }, [&] { game.render(); });
 ```
 
-The lambdas capture the heap objects, not `main`'s locals, so the callbacks stay
-valid. Variables that lived in `main` (frame counters, config, the parsed
-arguments) are not — put them in the game object.
+Statics are not captured at all, so the callbacks stay valid. Variables that
+lived in `main` (frame counters, config, the parsed arguments) are not — put
+them in the game object.
 
 The canvas is sized by CSS and SDL follows the DOM: give the `<canvas>` an
 explicit width in the page (a `width: auto` canvas that derives its size from

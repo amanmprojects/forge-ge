@@ -20,11 +20,13 @@
 // Headless capture:
 //   ./09_chess --shot out.png --frames 300 [--moves "e4 e5 Nf3"] [--fen FEN]
 //              [--level 3] [--title] [--size 1280x800]
+//   ./09_chess --record clip.mp4 --frames 1500     # bot-vs-bot video (ffmpeg)
 // CI=1 ./09_chess [--frames 300]      # deterministic bot-vs-bot smoke run
 #include <forge/forge.hpp>
 
 #include "ai.hpp"
 #include "chess.hpp"
+#include "clip.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -426,6 +428,7 @@ public:
         // No worker threads in the browser (they need SharedArrayBuffer and
         // cross-origin isolation): the bot searches inline, paced in update().
         syncBot_ = true;
+        botPace_ = 0.6f;
 #endif
         fitCamera(engine.viewport());
         mode_ = startInTitle_ ? Mode::Title : Mode::Play;
@@ -437,6 +440,7 @@ public:
     void setSeed(uint64_t s) { seed_ = s; }
     void setAttract(bool on) { attract_ = on; }
     void setSyncBot(bool on) { syncBot_ = on; }
+    void setBotPace(float seconds) { botPace_ = seconds; }
     void setStartInTitle(bool on) { startInTitle_ = on; }
     void setFlip(bool on) { flip_ = on; }
 
@@ -476,12 +480,11 @@ public:
     // ---------------------------------------------------------------- loop
     void update(float dt) {
         uiTime_ += dt;
-#if FORGE_PLATFORM_WEB
-        // The inline bot search returns instantly, so hold it back a beat:
-        // without this the attract game behind the title would play one move
-        // per frame (and the bot would answer before you see your own move).
+        // The inline bot search returns instantly, so the web build and
+        // --record hold it back a beat: without this the attract game would
+        // play one move per frame (and the bot would answer before you see
+        // your own move). --shot and CI leave botPace_ at 0.
         if (syncPace_ > 0.0f) syncPace_ -= dt;
-#endif
         auto& in = engine_->input();
         const forge::IVec2 vp = engine_->viewport();
         fitCamera(vp);
@@ -909,9 +912,7 @@ private:
     }
 
     void botPump() {
-#if FORGE_PLATFORM_WEB
         if (syncPace_ > 0.0f) return; // still "thinking" (see update())
-#endif
         if (!botToMove()) return;
         const ai::Level& level = ai::levels()[(size_t)(level_ - 1)];
         const uint64_t moveSeed = seed_ + (uint64_t)records_.size() * 7919ull;
@@ -923,9 +924,7 @@ private:
             fixed.movetimeMs = 0.0;
             const ai::Result r = bot_.thinkSync(pos_, fixed, moveSeed);
             if (r.move != chess::MOVE_NONE) applyMove(r.move);
-#if FORGE_PLATFORM_WEB
-            syncPace_ = 0.6f;
-#endif
+            syncPace_ = botPace_;
             return;
         }
         if (botState_ == BotState::Idle) {
@@ -1485,7 +1484,8 @@ private:
     Mode mode_ = Mode::Play;
     bool attract_ = false;
     bool syncBot_ = false;
-    float syncPace_ = 0.0f; // web build: min. time between inline bot moves
+    float botPace_ = 0.0f;  // min. seconds between inline bot moves (web, --record)
+    float syncPace_ = 0.0f; // countdown to the next inline bot move
     bool startInTitle_ = false;
     bool paused_ = false;
     bool flip_ = false;
@@ -1517,7 +1517,7 @@ private:
 
 // ------------------------------------------------------------------- main
 struct Args {
-    std::string shot, moves, fen, click, press;
+    std::string shot, record, moves, fen, click, press;
     int frames = 0;
     int level = 3;
     int width = 1280, height = 800;
@@ -1535,6 +1535,8 @@ Args parseArgs(int argc, char** argv) {
         auto next = [&]() -> const char* { return i + 1 < argc ? argv[++i] : nullptr; };
         if (arg == "--shot") {
             if (const char* v = next()) a.shot = v;
+        } else if (arg == "--record") {
+            if (const char* v = next()) a.record = v;
         } else if (arg == "--frames") {
             if (const char* v = next()) a.frames = std::atoi(v);
         } else if (arg == "--moves") {
@@ -1572,11 +1574,12 @@ void printUsage() {
         "  U undo - F flip - H hint - N new game - 1-5 bot level - ESC pause - Q quit\n"
         "\n"
         "  --shot FILE   render N frames of bot-vs-bot, save a PNG, exit\n"
+        "  --record FILE record N frames of bot-vs-bot to an MP4 (ffmpeg)\n"
         "  --frames N    frames to simulate before capturing/exiting\n"
         "  --moves \"...\"  scripted SAN/UCI opening, e.g. --moves \"e4 e5 Nf3\"\n"
         "  --fen FEN     start from a position instead of the initial one\n"
         "  --level N     bot strength 1..5 (Beginner … Expert)\n"
-        "  --size WxH    capture size for --shot (default 1280x800)\n"
+        "  --size WxH    capture size for --shot/--record (default 1280x800)\n"
         "  --seed N      bot randomness seed\n"
         "  --title       stay on the title screen\n"
         "  --attract     bot vs bot in the window\n"
@@ -1623,7 +1626,7 @@ int main(int argc, char** argv) {
     }
     forge::EngineConfig cfg;
     cfg.fixedStep = 1.0f / 60.0f;
-    cfg.window.vsync = args.shot.empty();
+    cfg.window.vsync = args.shot.empty() && args.record.empty();
 #if FORGE_PLATFORM_WEB
     // The window is the canvas: the field the game is drawn for, scaled by the
     // page's CSS. A non-resizable canvas keeps the drawing buffer stable.
@@ -1632,12 +1635,12 @@ int main(int argc, char** argv) {
     cfg.window.resizable = false;
 #endif
 #if FORGE_PLATFORM_WEB
-    // Emscripten takes the frame loop over by unwinding main()'s stack, so the
-    // engine and the game must outlive main: keep them on the heap.
-    auto engineOwner = std::make_unique<forge::Engine>(cfg);
-    auto gameOwner = std::make_unique<ChessGame>();
-    forge::Engine& engine = *engineOwner;
-    ChessGame& game = *gameOwner;
+    // Emscripten takes the frame loop over by unwinding main()'s stack, and
+    // with wasm exceptions on that unwind runs the destructors of main()'s
+    // locals (a unique_ptr owner would free the game under the loop). Statics
+    // outlive main and are never destroyed: the web runtime never exits.
+    static forge::Engine engine(cfg);
+    static ChessGame game;
 #else
     forge::Engine engine(cfg);
     ChessGame game;
@@ -1658,6 +1661,21 @@ int main(int argc, char** argv) {
         std::printf("chess: could not play --moves\n");
         return 1;
     }
+
+#if !FORGE_PLATFORM_WEB
+    if (!args.record.empty()) {
+        // Bot-vs-bot video: inline searches (deterministic) paced to a move
+        // every ~half second, one fixed step per frame, rendered offscreen.
+        game.setSyncBot(true);
+        game.setAttract(true);
+        game.setBotPace(0.5f);
+        const bool ok = clip::recordClip(
+            args.record, args.width, args.height, args.frames > 0 ? args.frames : 1500,
+            [&] { game.update(1.0f / 60.0f); },
+            [&](forge::Framebuffer* fb) { game.renderTo(fb); }, engine);
+        return ok && game.healthy() ? 0 : 1;
+    }
+#endif
 
     if (!args.shot.empty()) {
         // Deterministic capture: both sides are the bot, every search runs on
@@ -1708,9 +1726,7 @@ int main(int argc, char** argv) {
     // then hands over to the human. No frame cap: it runs until the tab closes.
     game.setStartInTitle(true);
     game.setAttract(false);
-    engine.runFixed(
-        [&](float dt) { game.update(dt); },
-        [&] { game.render(); });
+    engine.runFixed([](float dt) { game.update(dt); }, [] { game.render(); });
 #else
     const bool ci = std::getenv("CI") != nullptr;
     game.setAttract(args.attract || ci);

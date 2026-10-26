@@ -42,7 +42,12 @@ if(EMSCRIPTEN)
     # Web build: SDL3 comes from Emscripten's port, GL is the browser's WebGL2
     # (== OpenGL ES 3.0), and there is no m/dl/pthread (single-threaded; the
     # chess bot thinks inline instead of on a worker). See web/README.md.
+    # -fwasm-exceptions: forge::script unwinds return/break/continue with C++
+    # exceptions, and Emscripten's default build aborts on the first throw.
+    # Native wasm exception handling (every current browser) catches them; it
+    # must be on for every TU, hence a PUBLIC compile flag below too.
     set(FORGE_WEB_FLAGS
+        -fwasm-exceptions
         -sUSE_SDL=3
         -sMIN_WEBGL_VERSION=2
         -sMAX_WEBGL_VERSION=2
@@ -128,7 +133,7 @@ endif()
 if(EMSCRIPTEN)
     # -sUSE_SDL=3 has to be a compile flag as well: the driver adds the port's
     # SDL3 headers to the include path. The rest are linker settings.
-    target_compile_options(forge PUBLIC -sUSE_SDL=3)
+    target_compile_options(forge PUBLIC -sUSE_SDL=3 -fwasm-exceptions)
     target_link_options(forge PUBLIC ${FORGE_WEB_FLAGS})
 else()
     target_link_libraries(forge PUBLIC
@@ -176,6 +181,8 @@ if(FORGE_BUILD_EXAMPLES)
         get_filename_component(name "${src}" NAME_WE)
         add_executable("${name}" "${src}")
         target_link_libraries("${name}" PRIVATE forge)
+        # examples/common: clip.hpp, the shared --record (ffmpeg) helper.
+        target_include_directories("${name}" PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/examples/common")
         target_compile_options("${name}" PRIVATE ${FORGE_WARNING_FLAGS})
     endforeach()
 
@@ -183,25 +190,85 @@ if(FORGE_BUILD_EXAMPLES)
     # header-only, engine-free headers shared with tests/test_chess.cpp.
     add_executable(09_chess examples/chess/main.cpp)
     target_link_libraries(09_chess PRIVATE forge)
-    target_include_directories(09_chess PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/examples/chess")
+    target_include_directories(09_chess PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/examples/chess"
+        "${CMAKE_CURRENT_SOURCE_DIR}/examples/common")
     target_compile_options(09_chess PRIVATE ${FORGE_WARNING_FLAGS})
+
     if(EMSCRIPTEN)
-        # Web page: index.html + index.js + index.wasm + index.data (the
-        # preloaded piece sprites, font and SVGs). Serve the folder over HTTP.
+        # Web site: one folder per game, web/dist/<slug>/{index.html,index.js,
+        # index.wasm[,index.data]}, plus the gallery at web/dist/index.html
+        # (clips land in web/dist/clips/, see web/record.sh). Serve the folder
+        # over HTTP. Each page is web/shell.html.in with the game's title,
+        # controls and aspect ratio filled in.
         set(FORGE_WEB_DIST "${CMAKE_SOURCE_DIR}/web/dist"
             CACHE PATH "Output folder for the web build (index.html & friends)")
-        target_link_options(09_chess PRIVATE
-            "--shell-file=${CMAKE_SOURCE_DIR}/web/shell.html"
-            "--preload-file=${CMAKE_SOURCE_DIR}/examples/chess/assets@examples/chess/assets"
-        )
-        set_target_properties(09_chess PROPERTIES
-            OUTPUT_NAME "index"
-            SUFFIX ".html"
-            RUNTIME_OUTPUT_DIRECTORY "${FORGE_WEB_DIST}"
-            # The page shell is a link input, not a compiled one: relink when it
-            # changes so web/dist picks the edit up.
-            LINK_DEPENDS "${CMAKE_SOURCE_DIR}/web/shell.html"
-        )
+        configure_file("${CMAKE_SOURCE_DIR}/web/index.html" "${FORGE_WEB_DIST}/index.html" COPYONLY)
+
+        # Browsers have no system fonts: the games' first probed font path is
+        # backed by the bundled DejaVu Sans Mono Bold in the page's virtual FS.
+        set(FORGE_WEB_FONT "${CMAKE_SOURCE_DIR}/examples/chess/assets/fonts/DejaVuSansMono-Bold.ttf")
+
+        # forge_web_page(<target> <slug> TITLE .. SUBTITLE .. CONTROLS ..
+        #                ASPECT_W n ASPECT_H n [CREDIT ..] [PRELOAD src@dst ...])
+        # CONTROLS/CREDIT are HTML; CMake splits on ';', so no HTML entities.
+        function(forge_web_page target slug)
+            cmake_parse_arguments(PAGE "" "TITLE;SUBTITLE;CONTROLS;CREDIT;ASPECT_W;ASPECT_H" "PRELOAD" ${ARGN})
+            set(GAME_TITLE "${PAGE_TITLE}")
+            set(GAME_SUBTITLE "${PAGE_SUBTITLE}")
+            set(GAME_CONTROLS "${PAGE_CONTROLS}")
+            set(GAME_CREDIT "${PAGE_CREDIT}")
+            set(ASPECT_W "${PAGE_ASPECT_W}")
+            set(ASPECT_H "${PAGE_ASPECT_H}")
+            set(shell "${CMAKE_CURRENT_BINARY_DIR}/web/${slug}.html")
+            configure_file("${CMAKE_SOURCE_DIR}/web/shell.html.in" "${shell}" @ONLY)
+            target_link_options(${target} PRIVATE "--shell-file=${shell}")
+            foreach(item ${PAGE_PRELOAD})
+                target_link_options(${target} PRIVATE "--preload-file=${item}")
+            endforeach()
+            set_target_properties(${target} PROPERTIES
+                OUTPUT_NAME "index"
+                SUFFIX ".html"
+                RUNTIME_OUTPUT_DIRECTORY "${FORGE_WEB_DIST}/${slug}"
+                # The page shell is a link input, not a compiled one: relink
+                # when it changes so web/dist picks the edit up.
+                LINK_DEPENDS "${shell}")
+        endfunction()
+
+        forge_web_page(02_platformer platformer
+            TITLE "FORGE PLATFORMER"
+            SUBTITLE "arcade physics · procedural tilemap · dust particles · camera shake"
+            CONTROLS "<kbd>A</kbd>/<kbd>D</kbd> or arrows move · <kbd>Space</kbd>/<kbd>W</kbd> jump · <kbd>R</kbd> reset"
+            ASPECT_W 16 ASPECT_H 9)
+        forge_web_page(07_breakout breakout
+            TITLE "FORGE BREAKOUT"
+            SUBTITLE "Atari-style Breakout · synthesized SFX · particles · screen shake"
+            CONTROLS "<kbd>A</kbd>/<kbd>D</kbd>, arrows or mouse move · <kbd>Space</kbd>/click launch · <kbd>ESC</kbd> pause · <kbd>R</kbd> restart"
+            ASPECT_W 4 ASPECT_H 3
+            PRELOAD "${FORGE_WEB_FONT}@/usr/share/fonts/TTF/DejaVuSansMono-Bold.ttf")
+        forge_web_page(08_snake snake
+            TITLE "FORGE SNAKE"
+            SUBTITLE "classic Snake · golden bonus food · smooth interpolation · bot on the title card"
+            CONTROLS "<kbd>WASD</kbd> or arrows steer · <kbd>Space</kbd>/click start · <kbd>ESC</kbd> pause · <kbd>R</kbd> restart"
+            ASPECT_W 4 ASPECT_H 3
+            PRELOAD "${FORGE_WEB_FONT}@/usr/share/fonts/TTF/DejaVuSansMono-Bold.ttf")
+        forge_web_page(09_chess chess
+            TITLE "FORGE CHESS"
+            SUBTITLE "rules-complete chess · Cburnett pieces · negamax bot"
+            CONTROLS "drag or click a piece, then a target square · arrows + <kbd>Enter</kbd> also move · <kbd>U</kbd> undo · <kbd>F</kbd> flip · <kbd>H</kbd> hint · <kbd>N</kbd> new game · <kbd>1</kbd>–<kbd>5</kbd> level · <kbd>ESC</kbd> pause"
+            ASPECT_W 8 ASPECT_H 5
+            CREDIT " · chess core ported from <a href=\"https://github.com/amanmprojects/chess\">amanmprojects/chess</a>"
+            # The preloaded piece sprites, font and SVGs, at the paths the
+            # game already probes.
+            PRELOAD "${CMAKE_SOURCE_DIR}/examples/chess/assets@examples/chess/assets")
+        forge_web_page(10_lantern lantern
+            TITLE "FORGE LANTERN"
+            SUBTITLE "2D lighting + shadows · vignette post FX · scripted scoring · scene save/load"
+            CONTROLS "<kbd>WASD</kbd> or arrows move · walk over lanterns · <kbd>F5</kbd> save · <kbd>F9</kbd> load · <kbd>F1</kbd> overlay · <kbd>F3</kbd> tile grid · <kbd>H</kbd> help"
+            ASPECT_W 5 ASPECT_H 3
+            # Lantern probes the regular weight first; the bold face stands in.
+            PRELOAD "${FORGE_WEB_FONT}@/usr/share/fonts/TTF/DejaVuSansMono.ttf"
+                    "${CMAKE_SOURCE_DIR}/assets/lantern.fgs@assets/lantern.fgs")
     endif()
 endif()
 

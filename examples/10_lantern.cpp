@@ -16,7 +16,11 @@
 // - DebugOverlay: F1 panel with FPS graph, counts and the script's state.
 // - Input depth: action remaps (persisted to disk), touch drag, deadzone.
 // - Framebuffer/--shot + CI=1: deterministic capture and a smoke run.
+//   --record clip.mp4 renders the autopilot to a video (ffmpeg).
 #include <forge/forge.hpp>
+
+#include "clip.hpp"
+
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -362,16 +366,7 @@ struct Game {
         }
         if (move.lengthSq() > 1.0f) move = move.normalized();
         if (autopilot && player != forge::kNullEntity && !gems.empty()) {
-            Vec2 p = scene.registry().get<forge::Transform>(player).pos;
-            Vec2 best = p;
-            float bestD = 1e30f;
-            for (auto g : gems) {
-                if (!scene.registry().alive(g)) continue;
-                Vec2 gp = scene.registry().get<forge::Transform>(g).pos;
-                float d = (gp - p).lengthSq();
-                if (d < bestD) { bestD = d; best = gp; }
-            }
-            Vec2 dir = best - p;
+            Vec2 dir = autopilotDir(scene.registry().get<forge::Transform>(player).pos);
             if (dir.lengthSq() > 1.0f) move = dir.normalized();
         }
         movePlayer(move * PLAYER_SPEED * dt);
@@ -399,6 +394,48 @@ struct Game {
         if (postReady) post.setTime(time);
 
         if (!std::isfinite(cam.position.x) || !std::isfinite(cam.position.y)) healthy = false;
+    }
+
+    // Autopilot steering: breadth-first search over walkable tiles from the
+    // player's tile to the nearest lantern by path length, then head for the
+    // next tile on that path (steering straight at the lantern pins the player
+    // against the raised wall). Zero when no lantern is reachable.
+    Vec2 autopilotDir(Vec2 p) const {
+        if (p.x < 0 || p.y < 0 || p.x >= VIEW_W || p.y >= VIEW_H) return {0, 0};
+        auto index = [](int x, int y) { return y * MAP_W + x; };
+        auto walkable = [&](int x, int y) {
+            return x >= 0 && y >= 0 && x < MAP_W && y < MAP_H && !map.isSolid(map.tile(0, x, y));
+        };
+        std::vector<int> lanternAt(MAP_W * MAP_H, -1); // tile -> index into gems
+        for (size_t i = 0; i < gems.size(); ++i) {
+            if (!scene.registry().alive(gems[i])) continue;
+            const Vec2 gp = scene.registry().get<forge::Transform>(gems[i]).pos;
+            lanternAt[index((int)(gp.x / TILE), (int)(gp.y / TILE))] = (int)i;
+        }
+        const int start = index((int)(p.x / TILE), (int)(p.y / TILE));
+        std::vector<int> parent(MAP_W * MAP_H, -1);
+        std::vector<int> queue{start};
+        parent[start] = start;
+        for (size_t head = 0; head < queue.size(); ++head) {
+            const int cur = queue[head];
+            if (lanternAt[cur] >= 0) {
+                int step = cur; // walk back to the tile right after the start
+                while (parent[step] != start && step != start) step = parent[step];
+                const Vec2 target =
+                    step == start
+                        ? scene.registry().get<forge::Transform>(gems[(size_t)lanternAt[cur]]).pos
+                        : Vec2{(step % MAP_W + 0.5f) * TILE, (step / MAP_W + 0.5f) * TILE};
+                return target - p;
+            }
+            const int cx = cur % MAP_W, cy = cur / MAP_W;
+            const int nx[4] = {cx + 1, cx - 1, cx, cx}, ny[4] = {cy, cy, cy + 1, cy - 1};
+            for (int k = 0; k < 4; ++k) {
+                if (!walkable(nx[k], ny[k]) || parent[index(nx[k], ny[k])] >= 0) continue;
+                parent[index(nx[k], ny[k])] = cur;
+                queue.push_back(index(nx[k], ny[k]));
+            }
+        }
+        return {0, 0};
     }
 
     void movePlayer(Vec2 delta) {
@@ -632,6 +669,7 @@ bool saveScreenshot(const std::string& path, forge::IVec2 vp) {
 
 struct Args {
     std::string shot;
+    std::string record;
     int frames = 0;
     int width = 960, height = 576;
     bool help = false;
@@ -646,6 +684,7 @@ Args parseArgs(int argc, char** argv) {
         std::string arg = argv[i];
         auto next = [&]() -> const char* { return i + 1 < argc ? argv[++i] : nullptr; };
         if (arg == "--shot") { if (const char* v = next()) a.shot = v; }
+        else if (arg == "--record") { if (const char* v = next()) a.record = v; }
         else if (arg == "--frames") { if (const char* v = next()) a.frames = std::atoi(v); }
         else if (arg == "--size") {
             if (const char* v = next()) std::sscanf(v, "%dx%d", &a.width, &a.height);
@@ -666,7 +705,8 @@ void printUsage() {
         "  F1 overlay · F3 tile grid · H help · Q/ESC quit\n"
         "Options:\n"
         "  --shot FILE   simulate N frames, render offscreen, save PNG, exit\n"
-        "  --frames N    frames to simulate before the shot / CI exit\n"
+        "  --record FILE record N frames of the autopilot to an MP4 (ffmpeg)\n"
+        "  --frames N    frames to simulate before the shot / record / CI exit\n"
         "  --size WxH    capture size (default 960x576)\n"
         "  --no-save     do not write the autosave files (CI)\n"
         "  --selftest    run the save/load round-trip check and exit\n"
@@ -678,18 +718,29 @@ void printUsage() {
 int main(int argc, char** argv) {
     const Args args = parseArgs(argc, argv);
     if (args.help) { printUsage(); return 0; }
-    const bool ci = std::getenv("CI") != nullptr;
 
     forge::EngineConfig cfg;
     cfg.window.title = "Forge 10_lantern";
     cfg.window.width = 1280;
     cfg.window.height = 768;
-    cfg.window.vsync = args.shot.empty();
+    cfg.window.vsync = args.shot.empty() && args.record.empty();
     cfg.fixedStep = 1.0f / 60.0f;
+#if FORGE_PLATFORM_WEB
+    // The drawing buffer takes the canvas's CSS size once and then stays put
+    // (not resizable), so the lightmap and post targets keep one size.
+    cfg.window.resizable = false;
+    // Emscripten takes the frame loop over by unwinding main()'s stack, and
+    // with wasm exceptions on that unwind runs the destructors of main()'s
+    // locals (a unique_ptr owner would free the game under the loop). Statics
+    // outlive main and are never destroyed: the web runtime never exits.
+    static forge::Engine engine(cfg);
+    static Game game;
+#else
     forge::Engine engine(cfg);
+    Game game;
+#endif
     if (!engine.valid()) return 1;
 
-    Game game;
     if (!game.init(engine)) return 1;
     game.viewport = engine.viewport();
     // The overlay is a debug tool: off during normal play (F1 toggles), and
@@ -721,6 +772,20 @@ int main(int argc, char** argv) {
         std::remove("lantern-save.meta.json");
         return ok ? 0 : 1;
     }
+
+#if !FORGE_PLATFORM_WEB
+    if (!args.record.empty()) {
+        // Video of the autopilot lighting every lantern: one fixed step per
+        // frame, rendered offscreen at --size (pass the 1280x768 window size
+        // for the full view; the default is the 960x576 world).
+        game.autopilot = true;
+        const bool ok = clip::recordClip(
+            args.record, args.width, args.height, args.frames > 0 ? args.frames : 900,
+            [&] { game.update(1.0f / 60.0f); },
+            [&](forge::Framebuffer* fb) { game.renderTo(fb); }, engine);
+        return ok && game.healthy ? 0 : 1;
+    }
+#endif
 
     if (!args.shot.empty()) {
         game.autopilot = true;
@@ -757,6 +822,13 @@ int main(int argc, char** argv) {
         return ok && game.healthy ? 0 : 1;
     }
 
+#if FORGE_PLATFORM_WEB
+    // Runs until the tab closes; saves (F5) live in the page's in-memory FS.
+    // Nothing to capture: the loop touches only the statics, and main()'s
+    // locals are gone by frame one.
+    engine.runFixed([](float dt) { game.update(dt); }, [] { game.renderTo(nullptr); });
+#else
+    const bool ci = std::getenv("CI") != nullptr;
     const int ciFrames = args.frames > 0 ? args.frames : 240;
     game.autopilot = ci;
     int frame = 0;
@@ -765,7 +837,10 @@ int main(int argc, char** argv) {
             game.update(dt);
             if (ci && ++frame >= ciFrames) engine.quit();
         },
-        [&]() { game.renderTo(nullptr); });
+        [&]() {
+            game.viewport = engine.viewport(); // follow window resizes
+            game.renderTo(nullptr);
+        });
 
     if (!args.noSave && !ci) {
         // Best-effort autosave on a clean exit; never fatal.
@@ -773,5 +848,6 @@ int main(int argc, char** argv) {
     }
     if (ci) std::printf("CI ok: %d frames, score=%d lanterns=%d\n", frame, game.score,
                         (int)game.gems.size());
+#endif
     return game.healthy ? 0 : 1;
 }

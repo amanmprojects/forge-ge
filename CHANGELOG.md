@@ -4,6 +4,45 @@ All notable changes to Forge. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); the project is
 pre-1.0, so breaking changes are allowed and are listed here.
 
+## [Unreleased]
+
+### Added
+
+- Browser builds of all five games: `02_platformer`, `07_breakout`,
+  `08_snake`, `09_chess` and `10_lantern` each get a page under
+  `web/dist/<game>/`, generated from one template (`web/shell.html.in`) by
+  `forge_web_page()` in `CMakeLists.txt`, plus a gallery at
+  `web/dist/index.html`. Published to GitHub Pages by `web/deploy.sh`.
+- `--record FILE --frames N [--size WxH]` on the five games: the autopilot
+  runs one fixed step per frame, rendered offscreen and piped to `ffmpeg` as a
+  60 fps H.264 MP4 (`examples/common/clip.hpp`). `web/record.sh` records the
+  gallery clips.
+- `02_platformer --demo`: an autopilot that climbs the three platforms; the
+  example is now a `Platformer` struct with a render-to-target path.
+
+### Changed
+
+- `Engine::quit()` (and `quitOnEscape`) is a no-op on the web. Before, Q in
+  the chess page cancelled the main loop and froze the canvas.
+- The chess page moved from `web/dist/` to `web/dist/chess/`.
+- The chess bot's inline pacing is a runtime setting (`setBotPace`), on for
+  the web build and `--record`, off for `--shot`/CI as before.
+
+- The web build compiles with `-fwasm-exceptions`, and the web games keep
+  the engine and game in function-local statics instead of `unique_ptr`
+  owners (the exception-based unwind out of `main()` would destroy those).
+
+### Fixed
+
+- `PostProcess` on the web: its built-in passes declare `#version 330 core`,
+  which WebGL2 rejects. `Shader::load` now swaps a leading desktop directive
+  for the ES header on the web, for any source.
+- `forge::script` on the web: the interpreter unwinds `return`/`break` with
+  C++ exceptions, which aborted the page under Emscripten's default build.
+- `10_lantern` rendered at its startup size after the window was resized, and
+  its autopilot got pinned against the raised wall (it now follows a tile
+  BFS path and lights every lantern).
+
 ## [0.2.0] — 2026-10-19
 
 The "roadmap" release: 0.1.0 correctness debt plus every planned system in

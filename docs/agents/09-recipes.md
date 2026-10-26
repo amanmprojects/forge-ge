@@ -18,7 +18,8 @@ if (engine.input().pressed(forge::Key::P)) engine.quit();
 ```
 
 Closing the window (or `engine.quit()`) makes the loops exit; in a manual
-`beginFrame` loop it returns `false`.
+`beginFrame` loop it returns `false`. On the web `quit()` is a no-op: a page has
+nothing to quit to, and a stopped loop would freeze the canvas.
 
 ## World pass + HUD pass
 

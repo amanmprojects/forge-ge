@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # WebAssembly build for Forge (WebGL2 / Emscripten).
 #
-#   ./web/build.sh            # release build -> web/dist/index.html
+#   ./web/build.sh            # release build -> web/dist/ (gallery + one folder per game)
 #   ./web/build.sh Debug      # debug build
 #   EMSDK=/path/to/emsdk ./web/build.sh
 #
@@ -32,5 +32,5 @@ emcmake cmake -S . -B "$BUILD_DIR" -DCMAKE_BUILD_TYPE="$BUILD_TYPE"
 cmake --build "$BUILD_DIR" -j"$(nproc 2>/dev/null || echo 4)"
 
 echo
-echo "Built: web/dist/index.html"
+echo "Built: web/dist/index.html (gallery) + web/dist/{platformer,breakout,snake,chess,lantern}/"
 echo "Serve it with: python3 -m http.server 8000 -d web/dist"
