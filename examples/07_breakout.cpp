@@ -11,8 +11,12 @@
 // Headless capture (docs/CI): runs N fixed steps with a scripted autopilot,
 // writes the final frame to a PNG and exits.
 //   ./07_breakout --shot out.png --frames 900 [--level 3] [--title] [--no-ai]
+//   ./07_breakout --record clip.mp4 --frames 1200   # autopilot video (ffmpeg)
 // CI=1 ./07_breakout [--frames 240]      # autopilot smoke run, then exit 0
 #include <forge/forge.hpp>
+
+#include "clip.hpp"
+
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -1016,6 +1020,7 @@ private:
 // ------------------------------------------------------------------- util
 struct Args {
     std::string shot;
+    std::string record;
     int frames = 0;
     uint64_t seed = 20261018;
     int level = 0;
@@ -1035,6 +1040,7 @@ Args parseArgs(int argc, char** argv) {
         const std::string arg = argv[i];
         auto next = [&](void) -> const char* { return i + 1 < argc ? argv[++i] : nullptr; };
         if (arg == "--shot") { if (const char* v = next()) a.shot = v; }
+        else if (arg == "--record") { if (const char* v = next()) a.record = v; }
         else if (arg == "--frames") { if (const char* v = next()) a.frames = std::atoi(v); }
         else if (arg == "--seed") { if (const char* v = next()) a.seed = std::strtoull(v, nullptr, 10); }
         else if (arg == "--level") { if (const char* v = next()) a.level = std::atoi(v); }
@@ -1061,8 +1067,9 @@ void printUsage() {
         "  R restart · Q quit\n"
         "Options:\n"
         "  --shot FILE   render N fixed steps with the autopilot, save PNG, exit\n"
-        "  --frames N    frames to simulate/hold before exit (shot/CI)\n"
-        "  --size WxH    capture size for --shot (default 1024x768, offscreen)\n"
+        "  --record FILE record N fixed steps of the autopilot to an MP4 (ffmpeg)\n"
+        "  --frames N    frames to simulate/hold before exit (shot/record/CI)\n"
+        "  --size WxH    capture size for --shot/--record (default 1024x768)\n"
         "  --level N     start playing at level N (shot mode)\n"
         "  --title       stay on the title screen (shot mode)\n"
         "  --demo        watch the autopilot play (interactive)\n"
@@ -1089,21 +1096,46 @@ bool saveScreenshot(const std::string& path, forge::IVec2 vp) {
 int main(int argc, char** argv) {
     const Args args = parseArgs(argc, argv);
     if (args.help) { printUsage(); return 0; }
-    const bool ci = std::getenv("CI") != nullptr;
 
     forge::EngineConfig cfg;
     cfg.window.title = "Forge 07_breakout — Atari Breakout";
     cfg.window.width = 1024;
     cfg.window.height = 768;              // 4:3: the playfield fills it
-    cfg.window.vsync = args.shot.empty();
+    cfg.window.vsync = args.shot.empty() && args.record.empty();
     cfg.fixedStep = 1.0f / 60.0f;
+#if FORGE_PLATFORM_WEB
+    // The drawing buffer takes the canvas's CSS size once and then stays put
+    // (not resizable); the fitted camera letterboxes the playfield into it.
+    cfg.window.resizable = false;
+    // Emscripten takes the frame loop over by unwinding main()'s stack, and
+    // with wasm exceptions on that unwind runs the destructors of main()'s
+    // locals (a unique_ptr owner would free the game under the loop). Statics
+    // outlive main and are never destroyed: the web runtime never exits.
+    static forge::Engine engine(cfg);
+    static Breakout game;
+#else
     forge::Engine engine(cfg);
+    Breakout game;
+#endif
     if (!engine.valid()) return 1;
 
-    Breakout game;
     game.setSeed(args.seed);
     game.setEnglish(args.english);
     game.init(engine);
+
+#if !FORGE_PLATFORM_WEB
+    if (!args.record.empty()) {
+        // Video of the autopilot: a beat of the title card, then play. One
+        // fixed step per frame, rendered offscreen at --size.
+        game.setAutoplay(!args.noAi);
+        game.setSloppyBot(args.sloppy);
+        const bool ok = clip::recordClip(
+            args.record, args.width, args.height, args.frames > 0 ? args.frames : 1200,
+            [&] { game.update(1.0f / 60.0f); },
+            [&](forge::Framebuffer* fb) { game.renderTo(fb); }, engine);
+        return ok && game.healthy() ? 0 : 1;
+    }
+#endif
 
     if (!args.shot.empty()) {
         // Deterministic capture: drive the simulation with a fixed dt (no wall
@@ -1142,6 +1174,13 @@ int main(int argc, char** argv) {
         return ok && sane ? 0 : 1;
     }
 
+#if FORGE_PLATFORM_WEB
+    // The page opens on the title card and runs until the tab closes. Nothing
+    // to capture: the loop touches only the statics, and main()'s locals are
+    // gone by frame one.
+    engine.runFixed([](float dt) { game.update(dt); }, [] { game.render(); });
+#else
+    const bool ci = std::getenv("CI") != nullptr;
     game.setAutoplay((args.demo || ci) ? !args.noAi : false);
     const int frameLimit = args.frames > 0 ? args.frames : (ci ? 600 : 0);
     int frames = 0;
@@ -1151,6 +1190,7 @@ int main(int argc, char** argv) {
             game.render();
             if (frameLimit > 0 && ++frames >= frameLimit) engine.quit();
         });
+#endif
     std::printf("breakout: score=%06d level=%d bricks_left=%d sane=%d\n",
                 game.score(), game.level(), game.bricksLeft(), game.healthy() ? 1 : 0);
     return game.healthy() ? 0 : 1;

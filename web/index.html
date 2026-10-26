@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Forge &mdash; games in WebAssembly</title>
+  <meta name="description" content="Five games built on Forge, a C++20 2D engine (SDL3 + OpenGL), compiled to WebAssembly and playable in the browser.">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='4' y='4' width='24' height='24' rx='5' fill='%237fb069'/%3E%3C/svg%3E">
+  <!-- Gallery: copied to web/dist/index.html by the web build. Each card links
+       to a game folder (web/dist/<slug>/) and loops a clip recorded with the
+       game's --record flag (web/dist/clips/, see web/record.sh). -->
+  <style>
+    :root { color-scheme: dark; }
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0; background: #15181c; color: #c9d1d9;
+      font: 14px/1.55 ui-monospace, "DejaVu Sans Mono", Menlo, Consolas, monospace;
+    }
+    main { max-width: 1240px; margin: 0 auto; padding: 40px 20px 56px; }
+    header { margin-bottom: 30px; }
+    h1 { margin: 0; font-size: 26px; letter-spacing: .3em; color: #e6edf3; }
+    header p { margin: 8px 0 0; color: #8b949e; max-width: 760px; }
+    a { color: #7fa6d9; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    .grid { display: grid; gap: 22px; grid-template-columns: repeat(auto-fill, minmax(360px, 1fr)); }
+    .card {
+      display: flex; flex-direction: column; background: #1b1f25;
+      border: 1px solid #2b3137; border-radius: 8px; overflow: hidden;
+    }
+    .card .media { display: block; background: #101317; line-height: 0; }
+    .card video { width: 100%; height: auto; display: block; }
+    .card .body { padding: 14px 16px 16px; display: flex; flex-direction: column; gap: 8px; flex: 1; }
+    .card h2 { margin: 0; font-size: 15px; letter-spacing: .18em; color: #e6edf3; }
+    .card p { margin: 0; color: #9da7b1; font-size: 13px; }
+    .tags { display: flex; flex-wrap: wrap; gap: 6px; }
+    .tags span {
+      font-size: 11px; color: #8b949e; border: 1px solid #30363d;
+      border-radius: 10px; padding: 0 8px;
+    }
+    .play {
+      margin-top: auto; align-self: flex-start; padding: 6px 14px; border-radius: 5px;
+      background: #7fb069; color: #0d1117; font-weight: 700; letter-spacing: .08em;
+    }
+    .play:hover { text-decoration: none; background: #94c47e; }
+    footer { margin-top: 36px; color: #6e7681; font-size: 12px; }
+    code { color: #adbac7; }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>FORGE</h1>
+    <p>Five games built on <a href="https://github.com/amanmprojects/forge-ge">Forge</a>, a
+    C++20 2D engine on SDL3 and OpenGL. Each page runs the same C++ source as the desktop
+    build, compiled to WebAssembly and drawn with WebGL2. The clips are the games' own
+    autopilots, rendered frame by frame with <code>--record</code>.</p>
+  </header>
+
+  <section class="grid">
+    <article class="card">
+      <a class="media" href="breakout/"><video src="clips/breakout.mp4" poster="clips/breakout.jpg"
+        width="1024" height="768" autoplay muted loop playsinline preload="metadata"></video></a>
+      <div class="body">
+        <h2>BREAKOUT</h2>
+        <p>Atari-style Breakout with armored bricks, paddle spin, particle bursts and
+        screen shake. Every sound is synthesized at startup; there are no asset files.</p>
+        <div class="tags"><span>particles</span><span>camera trauma</span><span>synth audio</span></div>
+        <a class="play" href="breakout/">PLAY</a>
+      </div>
+    </article>
+
+    <article class="card">
+      <a class="media" href="snake/"><video src="clips/snake.mp4" poster="clips/snake.jpg"
+        width="1024" height="768" autoplay muted loop playsinline preload="metadata"></video></a>
+      <div class="body">
+        <h2>SNAKE</h2>
+        <p>Classic Snake that glides between cells and speeds up as you eat. Every fifth
+        apple drops a golden bonus that expires if you dawdle.</p>
+        <div class="tags"><span>fixed-step sim</span><span>interpolation</span><span>bot</span></div>
+        <a class="play" href="snake/">PLAY</a>
+      </div>
+    </article>
+
+    <article class="card">
+      <a class="media" href="chess/"><video src="clips/chess.mp4" poster="clips/chess.jpg"
+        width="1280" height="800" autoplay muted loop playsinline preload="metadata"></video></a>
+      <div class="body">
+        <h2>CHESS</h2>
+        <p>Full rules (castling, en passant, promotion, repetition, fifty-move rule) on a
+        perft-verified 0x88 move generator, against a negamax bot with five levels.</p>
+        <div class="tags"><span>0x88 rules</span><span>negamax bot</span><span>drag &amp; drop</span></div>
+        <a class="play" href="chess/">PLAY</a>
+      </div>
+    </article>
+
+    <article class="card">
+      <a class="media" href="lantern/"><video src="clips/lantern.mp4" poster="clips/lantern.jpg"
+        width="1280" height="768" autoplay muted loop playsinline preload="metadata"></video></a>
+      <div class="body">
+        <h2>LANTERN</h2>
+        <p>Light every lantern in a dark tilemap. The engine's integration demo: 2D lights
+        with shadows, a vignette pass, scoring in a script file and JSON scene save/load.</p>
+        <div class="tags"><span>lighting</span><span>post FX</span><span>scripting</span><span>save/load</span></div>
+        <a class="play" href="lantern/">PLAY</a>
+      </div>
+    </article>
+
+    <article class="card">
+      <a class="media" href="platformer/"><video src="clips/platformer.mp4" poster="clips/platformer.jpg"
+        width="1280" height="720" autoplay muted loop playsinline preload="metadata"></video></a>
+      <div class="body">
+        <h2>PLATFORMER</h2>
+        <p>A small platformer: arcade physics against a procedural tilemap, dust particles
+        on jumps and landings, and a camera that follows and shakes.</p>
+        <div class="tags"><span>physics</span><span>tilemap</span><span>particles</span></div>
+        <a class="play" href="platformer/">PLAY</a>
+      </div>
+    </article>
+  </section>
+
+  <footer>
+    Keyboard required (chess also plays with the mouse). Click a game once to give it focus;
+    the first click also unlocks sound.
+    Source: <a href="https://github.com/amanmprojects/forge-ge">github.com/amanmprojects/forge-ge</a>.
+  </footer>
+</main>
+</body>
+</html>

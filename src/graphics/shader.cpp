@@ -79,7 +79,26 @@ Shader& Shader::operator=(Shader&& o) noexcept {
     return *this;
 }
 
+#if FORGE_PLATFORM_WEB
+// Desktop sources that open with `#version 330 core` (PostProcess's built-in
+// passes, a game's own shaders) get the ES header instead, so they compile on
+// WebGL2 as long as their bodies stay in the shared subset. GLSL ES 3.00 wants
+// the directive on the very first line, so leading whitespace goes too.
+static std::string toEsSource(const char* src) {
+    static const char kDesktop[] = "#version 330 core";
+    std::string s = src;
+    const size_t at = s.find_first_not_of(" \t\r\n");
+    if (at != std::string::npos && s.compare(at, sizeof(kDesktop) - 1, kDesktop) == 0)
+        s.replace(0, at + sizeof(kDesktop) - 1, FORGE_GLSL_HEADER);
+    return s;
+}
+#endif
+
 static uint32_t compileStage(uint32_t type, const char* src) {
+#if FORGE_PLATFORM_WEB
+    const std::string esSrc = toEsSource(src);
+    src = esSrc.c_str();
+#endif
     uint32_t sh = gl::glCreateShader(type);
     gl::glShaderSource(sh, 1, &src, nullptr);
     gl::glCompileShader(sh);

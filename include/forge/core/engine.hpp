@@ -3,6 +3,7 @@
 // run(update, render): fixed-timestep update, interpolated... (no interp;
 // variable render), VSync swap, stats. Subclass or use callbacks.
 
+#include "forge/core/platform.hpp"
 #include "forge/core/window.hpp"
 #include "forge/core/input.hpp"
 #include "forge/core/time.hpp"
@@ -65,7 +66,10 @@ public:
     // frame(dt) runs once per frame; the input window commits when it returns.
     void runVariable(std::function<void(float)> frame);
 
-    void quit() { quitting_ = true; }
+    // Ends runFixed/runVariable after the current frame. A web page has
+    // nothing to quit to (a stopped loop is a frozen canvas), so it is a
+    // no-op there and a game's Q/ESC-to-quit binding just does nothing.
+    void quit() { quitting_ = !FORGE_PLATFORM_WEB; }
     bool quitting() const { return quitting_; }
 
     // Viewport helpers

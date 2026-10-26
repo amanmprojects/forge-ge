@@ -3,8 +3,10 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Forge Chess &mdash; rules + bot, in WebAssembly</title>
-  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ctext x='3' y='26' font-size='26'%3E%E2%99%9E%3C/text%3E%3C/svg%3E">
+  <!-- Template: CMake's forge_web_page() fills in the @-variables, then
+       emcc --shell-file replaces the SCRIPT marker with the loader. -->
+  <title>@GAME_TITLE@ &mdash; Forge, in WebAssembly</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='4' y='4' width='24' height='24' rx='5' fill='%237fb069'/%3E%3C/svg%3E">
   <style>
     :root { color-scheme: dark; }
     * { box-sizing: border-box; }
@@ -19,10 +21,10 @@
     p.sub { margin: 5px 0 0; color: #8b949e; font-size: 12px; }
     #stage { position: relative; line-height: 0; }
     canvas {
-      display: block; aspect-ratio: 8 / 5;
+      display: block; aspect-ratio: @ASPECT_W@ / @ASPECT_H@;
       /* Width is explicit: SDL follows the DOM size, so `auto` would chase
          its own drawing buffer. The third term caps the height at ~74vh. */
-      width: min(96vw, 1400px, calc(74vh * 8 / 5)); height: auto;
+      width: min(96vw, 1400px, calc(74vh * @ASPECT_W@ / @ASPECT_H@)); height: auto;
       background: #101317; border: 1px solid #2b3137; border-radius: 6px;
       outline: none; touch-action: none; cursor: pointer;
     }
@@ -40,12 +42,16 @@
     kbd { background: #21262d; border: 1px solid #30363d; border-radius: 3px; padding: 0 4px; color: #adbac7; }
     footer a { color: #7fa6d9; text-decoration: none; }
     footer a:hover { text-decoration: underline; }
+    nav { position: fixed; top: 12px; left: 16px; font-size: 12px; }
+    nav a { color: #8b949e; text-decoration: none; }
+    nav a:hover { color: #e6edf3; }
   </style>
 </head>
 <body>
+  <nav><a href="../">&larr; all games</a></nav>
   <header>
-    <h1>FORGE CHESS</h1>
-    <p class="sub">rules-complete chess &middot; Cburnett pieces &middot; negamax bot &middot; compiled to WebAssembly</p>
+    <h1>@GAME_TITLE@</h1>
+    <p class="sub">@GAME_SUBTITLE@ &middot; compiled to WebAssembly</p>
   </header>
 
   <div id="stage">
@@ -53,16 +59,14 @@
     <div id="overlay">
       <div id="bar"><div id="fill"></div></div>
       <div id="status">Downloading&hellip;</div>
-      <div id="hint">click the board once to give it keyboard focus</div>
+      <div id="hint">click the game once to give it keyboard focus</div>
     </div>
   </div>
 
   <footer>
-    drag or click a piece, then a target square &middot; arrows + <kbd>Enter</kbd> also move &middot;
-    <kbd>U</kbd> undo &middot; <kbd>F</kbd> flip &middot; <kbd>H</kbd> hint &middot; <kbd>N</kbd> new game &middot;
-    <kbd>1</kbd>&ndash;<kbd>5</kbd> level &middot; <kbd>ESC</kbd> pause<br>
-    <span style="opacity:.75">Forge (SDL3 + OpenGL/WebGL2) &middot; chess core ported from
-    <a href="https://github.com/amanmprojects/chess">amanmprojects/chess</a></span>
+    @GAME_CONTROLS@<br>
+    <span style="opacity:.75">built with <a href="https://github.com/amanmprojects/forge-ge">Forge</a>,
+    a C++20 2D engine (SDL3 + OpenGL/WebGL2)@GAME_CREDIT@</span>
   </footer>
 
   <script type="text/javascript">
@@ -72,7 +76,7 @@
     var canvasElement = document.getElementById('canvas');
 
     // Losing the context is recoverable only by reloading; tell the user instead
-    // of silently freezing the board.
+    // of silently freezing the game.
     canvasElement.addEventListener('webglcontextlost', function (e) {
       overlayElement.classList.remove('gone');
       statusElement.textContent = 'WebGL context lost - reload the page';
@@ -100,12 +104,12 @@
       setStatus: setStatus,
       print: function () { console.log.apply(console, arguments); },
       printErr: function () { console.warn.apply(console, arguments); },
-      monitorRunDependencies: function (left) {
-        this.totalDependencies = Math.max(this.totalDependencies || 0, left);
-        if (!left) {
-          overlayElement.classList.add('gone');
-          canvasElement.focus();
-        }
+      // Fires once the wasm and any preloaded data are in, right before
+      // main(). (monitorRunDependencies never fires for a page without
+      // preloaded data, so it can't be what hides the overlay.)
+      onRuntimeInitialized: function () {
+        overlayElement.classList.add('gone');
+        canvasElement.focus();
       },
       onAbort: function (what) {
         overlayElement.classList.remove('gone');

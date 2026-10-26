@@ -80,18 +80,25 @@ the code macro it drives is `FORGE_PROFILING`, always defined 0/1),
 `-DFORGE_ENABLE_SANITIZERS=ON|OFF` (ASan+UBSan; default ON for single-config
 Debug builds).
 
-### Web build (`09_chess`)
+### Web build and gallery
+
+The five games play in the browser at
+**<https://amanmprojects.github.io/forge-ge/>**, each next to a clip of its
+autopilot.
 
 ```bash
 ./web/build.sh                      # needs the Emscripten SDK; writes web/dist/
+./web/record.sh                     # desktop build + ffmpeg -> web/dist/clips/
 python3 -m http.server 8000 -d web/dist
-cd web/dist && vercel link --project forge-chess && vercel deploy --prod
+./web/deploy.sh                     # web/dist -> gh-pages (GitHub Pages)
 ```
 
-`web/build.sh` builds `09_chess` for the browser: SDL3 comes from Emscripten's
-port, the OpenGL path maps onto WebGL2, and the chess assets (sprites, font) are
-preloaded into the wasm filesystem. See [`web/README.md`](web/README.md) for what
-the port changes and why the game state must outlive `main()`.
+`web/build.sh` builds `02_platformer`, `07_breakout`, `08_snake`, `09_chess` and
+`10_lantern` for the browser, one folder each under `web/dist/`, plus the
+gallery page. SDL3 comes from Emscripten's port, the OpenGL path maps onto
+WebGL2, and the assets (chess sprites, a font, the lantern script) are
+preloaded into the wasm filesystem. See [`web/README.md`](web/README.md) for
+what the port changes and why the game state must outlive `main()`.
 
 ### Headless capture (`07_breakout`, `08_snake`, `09_chess`, `10_lantern`)
 
@@ -134,6 +141,12 @@ CI=1 ./build/09_chess                                            # plays a game,
 ./build/10_lantern --shot lantern.png --frames 600               # lit scene + HUD
 CI=1 ./build/10_lantern --frames 240                             # smoke run, exit 0/1
 ```
+
+`--record clip.mp4 --frames N` (all four, plus `02_platformer`) is the video
+form of `--shot`: the autopilot runs one fixed step per frame, each frame is
+rendered offscreen at `--size` and piped to `ffmpeg` as a 60 fps H.264 MP4, so a
+clip is smooth and reproducible even on a slow machine. `web/record.sh` records
+the gallery clips this way.
 
 `10_lantern` is the integration example for the 0.2.0 systems: a Tiled map with
 a slope, a player lantern, `LightingSystem`, a vignette `PostProcess`, a

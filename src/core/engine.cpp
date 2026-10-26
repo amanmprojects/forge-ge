@@ -138,7 +138,7 @@ bool Engine::pumpEvents() {
                 if (!ev.key.repeat)
                     input_.setKeyFromScancode(ev.key.scancode, ev.key.down);
                 if (cfg_.quitOnEscape && ev.key.scancode == SDL_SCANCODE_ESCAPE && ev.key.down)
-                    quitting_ = true;
+                    quit();
                 break;
             case SDL_EVENT_TEXT_INPUT:
                 input_.pushText(ev.text.text);
